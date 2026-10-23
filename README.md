@@ -25,15 +25,22 @@ it in one sitting, use it.
 
 ## keydist
 
-`keydist` reads a single manifest — `~/.local/etc/keydist.toml` — resolves
-the secrets it references, and incrementally updates each consumer's `.env`
-file in the format that consumer understands. When a file's content actually
-changed, an optional `post` command runs (e.g. restart the service).
+`keydist` locates a manifest (see below), resolves the secrets it
+references, and incrementally updates each consumer's `.env` file in the
+format that consumer understands. When a file's content actually changed,
+an optional `post` command runs (e.g. restart the service).
 
 ### Manifest
 
+The manifest is taken from `--config PATH` / `-c PATH` when given (it must
+exist); otherwise the first existing file of this lookup order is used:
+
+1. `$XDG_CONFIG_HOME/keydist/keydist.toml` (default `~/.config/keydist/keydist.toml`)
+2. `~/.local/etc/keydist.toml` (legacy default)
+3. `/etc/keydist/keydist.toml`
+
 ```toml
-# ~/.local/etc/keydist.toml   (chmod 600 recommended)
+# ~/.config/keydist/keydist.toml   (chmod 600 recommended)
 
 [secrets]
 # Bare string / number / boolean -> literal, written verbatim (booleans as true/false):
@@ -99,6 +106,9 @@ disagree about quote semantics.
 
 - Files are rewritten only when content changes; unchanged files keep their
   mtime and skip `post`.
+- `--dry-run` / `-n` prints a unified diff of every pending change plus the
+  `post` commands that would run — no files are written, chmodded, or
+  executed.
 - Target files are always ensured mode `0600`; new files are created `0600`
   from the start.
 - `post` is split with `shlex` and capped at 30 s; non-zero exit or timeout
@@ -110,10 +120,18 @@ disagree about quote semantics.
 - Exit code `0` when every target succeeded, `1` otherwise, with a failure
   summary on stderr.
 
+### Usage
+
+```bash
+keydist                 # apply the manifest
+keydist --dry-run       # show unified diffs of pending changes; run nothing
+keydist -c ~/alt.toml   # use an explicit manifest
+```
+
 ### Install
 
 ```bash
 install -Dm755 keydist ~/.local/bin/keydist
 ```
 
-Then write `~/.local/etc/keydist.toml` (recommended `chmod 600`) and run `keydist`.
+Then write `~/.config/keydist/keydist.toml` (recommended `chmod 600`) and run `keydist`.
