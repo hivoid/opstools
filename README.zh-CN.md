@@ -21,14 +21,21 @@ English: [README.md](README.md)
 
 ## keydist
 
-`keydist` 读取唯一一份清单 `~/.local/etc/keydist.toml`，解析其中引用的
-secrets，按各消费端能理解的格式**增量**更新其 `.env` 文件；文件内容实际
-变化时执行可选的 `post` 命令（例如重启服务）。
+`keydist` 按下述规则定位清单，解析其中引用的 secrets，按各消费端能理解的
+格式**增量**更新其 `.env` 文件；文件内容实际变化时执行可选的 `post` 命令
+（例如重启服务）。
 
 ### 清单格式
 
+给出 `--config PATH` / `-c PATH` 时直接使用该文件（必须存在）；否则按
+以下查找顺序取第一个存在的清单：
+
+1. `$XDG_CONFIG_HOME/keydist/keydist.toml`（默认 `~/.config/keydist/keydist.toml`）
+2. `~/.local/etc/keydist.toml`（旧默认路径）
+3. `/etc/keydist/keydist.toml`
+
 ```toml
-# ~/.local/etc/keydist.toml   （建议 chmod 600）
+# ~/.config/keydist/keydist.toml   （建议 chmod 600）
 
 [secrets]
 # 裸字符串/数字/布尔 = 字面量，原样写入（布尔渲染为 true/false）：
@@ -90,11 +97,21 @@ TLS_CERT    = "tls_cert"
 ### 行为细节
 
 - 仅在内容变化时重写文件；未变化的文件保持 mtime 并跳过 `post`。
+- `--dry-run` / `-n` 打印每个待发生变更的 unified diff 及将要执行的
+  `post` 命令——不写文件、不改权限、不执行任何命令。
 - 目标文件始终确保 `0600`；新建文件从一开始就是 `0600`。
 - `post` 经 `shlex` 切分执行，超时 30 秒；非零退出或超时视为该目标失败。
 - 自动清理历史运行遗留的重复键（附带警告）。
 - 启动时检查清单权限：组/其他用户可读会告警（其中可能含 secret 引用）。
 - 全部目标成功退出码 `0`；否则退出码 `1`，stderr 打印失败汇总。
+
+### 用法
+
+```bash
+keydist                 # 按清单执行分发
+keydist --dry-run       # 显示待发生变更的 unified diff，不做任何改动
+keydist -c ~/alt.toml   # 显式指定清单
+```
 
 ### 安装
 
@@ -102,4 +119,4 @@ TLS_CERT    = "tls_cert"
 install -Dm755 keydist ~/.local/bin/keydist
 ```
 
-随后编写 `~/.local/etc/keydist.toml`（建议 `chmod 600`）并运行 `keydist`。
+随后编写 `~/.config/keydist/keydist.toml`（建议 `chmod 600`）并运行 `keydist`。

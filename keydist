@@ -12,8 +12,14 @@ keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
 - 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
 - 仅在文件内容实际变化时触发 post 事件
 - 每次运行确保目标文件权限为 600
+- 清单查找顺序：--config/-c 显式路径 > $XDG_CONFIG_HOME/keydist/keydist.toml
+  （默认 ~/.config/keydist/keydist.toml）> ~/.local/etc/keydist.toml（旧默认）
+  > /etc/keydist/keydist.toml
+- --dry-run：打印将发生变化的 unified diff，不写文件、不执行 post
 """
 
+import argparse
+import difflib
 import os
 import pathlib
 import re
@@ -22,7 +28,6 @@ import subprocess
 import sys
 import tomllib
 
-MASTER = pathlib.Path.home() / ".local/etc/keydist.toml"
 DEFAULT_STYLE = "shell"
 REF_KINDS = ("env", "envfile", "file", "chain")
 
@@ -229,7 +234,9 @@ def resolve_style(name: str, target: dict) -> tuple[str, str]:
 # .env 增量更新（保持上一版设计，含重复键清理）
 # ---------------------------------------------------------------------------
 
-def update_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> tuple[bool, list[str]]:
+def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> tuple[str, str, list[str]]:
+    """计算更新后的完整内容（不做任何写入，供 dry-run 复用）。
+    返回 (原内容, 新内容, 警告)。"""
     original = path.read_text() if path.exists() else ""
     lines = original.splitlines()
     replaced: set[str] = set()
@@ -259,35 +266,83 @@ def update_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
             new_lines.append(format_env_line(key, value, style))
 
     new_content = "\n".join(new_lines) + ("\n" if new_lines else "")
-    changed = new_content != original
-    if changed:
-        # 以 0600 直接创建/截断写入，避免首次创建时短暂出现宽权限文件
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(new_content)
-    if path.exists():
-        path.chmod(0o600)
-
     warns = []
     if dropped:
         warns.append("removed stale duplicate key(s): " + ", ".join(sorted(set(dropped))))
-    return changed, warns
+    return original, new_content, warns
+
+
+def write_env_file(path: pathlib.Path, content: str) -> None:
+    """以 0600 创建/截断写入，避免首次创建时短暂出现宽权限文件。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    path.chmod(0o600)
+
+
+def diff_text(path: pathlib.Path, old: str, new: str) -> str:
+    """两份内容的 unified diff（对无结尾换行的行补齐，保证逐行输出）。"""
+    lines = difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True),
+        fromfile=f"{path} (current)", tofile=f"{path} (proposed)",
+    )
+    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+
+# ---------------------------------------------------------------------------
+# 命令行与清单查找
+# ---------------------------------------------------------------------------
+
+MANIFEST_SEARCH_PATH: tuple[pathlib.Path, ...] = (
+    pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config")
+    / "keydist" / "keydist.toml",
+    pathlib.Path.home() / ".local/etc/keydist.toml",  # 旧默认路径，保留兼容
+    pathlib.Path("/etc/keydist/keydist.toml"),
+)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="keydist",
+        description="把清单里的 secrets 增量分发到各消费端 .env 文件。",
+    )
+    p.add_argument("-c", "--config", metavar="PATH",
+                   help="清单文件路径（默认按查找顺序取第一个存在的）")
+    p.add_argument("-n", "--dry-run", action="store_true",
+                   help="只打印将要发生的变更（unified diff），不写文件、不执行 post")
+    return p.parse_args(argv)
+
+
+def find_manifest(explicit: str | None) -> pathlib.Path:
+    """--config 显式路径优先（必须存在）；否则取查找顺序中第一个存在的清单。"""
+    if explicit:
+        p = pathlib.Path(os.path.expanduser(explicit))
+        if not p.exists():
+            print(f"[error] manifest not found: {p}", file=sys.stderr)
+            sys.exit(1)
+        return p
+    for p in MANIFEST_SEARCH_PATH:
+        if p.exists():
+            return p
+    searched = "\n  ".join(map(str, MANIFEST_SEARCH_PATH))
+    print(f"[error] manifest not found; searched:\n  {searched}\n"
+          "use --config PATH to specify one", file=sys.stderr)
+    sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if not MASTER.exists():
-        print(f"[error] manifest not found: {MASTER}", file=sys.stderr)
-        sys.exit(1)
+    args = parse_args()
+    master = find_manifest(args.config)
 
-    mode = MASTER.stat().st_mode & 0o777
+    mode = master.stat().st_mode & 0o777
     if mode & 0o077:
-        print(f"[warn] {MASTER} is too permissive ({oct(mode)}); "
+        print(f"[warn] {master} is too permissive ({oct(mode)}); "
               "it may contain secret references — chmod 600 recommended", file=sys.stderr)
 
-    data = tomllib.loads(MASTER.read_text())
+    data = tomllib.loads(master.read_text())
     secrets = data.get("secrets", {})
     targets = data.get("targets", {})
 
@@ -348,9 +403,20 @@ def main() -> None:
         for w in warns:
             print(f"  [warn] {w}", file=sys.stderr)
 
-        changed, warns = update_env_file(path, updates, style)
-        state = "updated" if changed else "unchanged"
-        print(f"[{state}] {name} -> {path}")
+        original, new_content, warns = render_env_file(path, updates, style)
+        changed = new_content != original
+        if args.dry_run:
+            state = "would update" if changed else "unchanged"
+            print(f"[{state}] {name} -> {path} (dry-run)")
+            if changed:
+                sys.stdout.write(diff_text(path, original, new_content))
+        else:
+            if changed:
+                write_env_file(path, new_content)
+            elif path.exists():
+                path.chmod(0o600)  # 内容未变也确保权限为 0600
+            state = "updated" if changed else "unchanged"
+            print(f"[{state}] {name} -> {path}")
         for w in warns:
             print(f"  [warn] {w}", file=sys.stderr)
 
@@ -359,6 +425,9 @@ def main() -> None:
             continue
         if not changed:
             print("  [post] skipped (no changes)")
+            continue
+        if args.dry_run:
+            print(f"  [post] would run: {post}")
             continue
 
         print(f"  [post] {post}")
