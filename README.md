@@ -1,25 +1,39 @@
-# ops-toolkit
+# opstools
 
-A toolkit of small, self-contained operations tools. Every tool is a single
-executable script built only on the Python 3.11+ standard library — nothing
-to install, nothing running in the background. Copy it onto a machine, read
-it in one sitting, use it.
-
-| Tool | Description |
-| --- | --- |
-| [keydist](#keydist) | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change |
+A collection of single-file operations tools. Each tool is one standalone
+executable script — Python, shell, or whatever language suits the job —
+sharing no code with its siblings: no installer, no daemon, no framework.
+Copy a tool onto a machine, read it in one sitting, use it. More tools join
+over time.
 
 简体中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
+## Tools
+
+| Tool | Language | Description |
+| --- | --- | --- |
+| [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change |
+
 ## Principles
 
-- **Zero dependencies** — standard library only (`tomllib` requires Python 3.11+).
+- **Single file, zero dependencies** — one executable per tool, depending
+  only on its language's standard library; the language is chosen per tool
+  and noted in the table above.
 - **Fail closed** — malformed or ambiguous configuration is a hard error,
   never silently downgraded into something unsafe.
-- **Idempotent** — consumer files are rewritten only when their content
-  actually changes, so downstream hooks fire exactly once per change.
-- **Local-first** — manifests under `~/.local/etc/`, executables under
-  `~/.local/bin/`, no network access.
+- **Idempotent** — repeated runs converge to the same state; side effects
+  (file rewrites, hooks, commands) fire only on real change.
+- **Local-first** — config under `~/.config/` (machine-wide under `/etc/`),
+  executables under `~/.local/bin/`, no network access.
+
+## Install
+
+Tools are independent — install only the ones you need, straight from the
+repository into `~/.local/bin`:
+
+```bash
+install -m755 keydist ~/.local/bin/keydist
+```
 
 ---
 
@@ -128,10 +142,7 @@ keydist --dry-run       # show unified diffs of pending changes; run nothing
 keydist -c ~/alt.toml   # use an explicit manifest
 ```
 
-### Install
+### Getting started
 
-```bash
-install -Dm755 keydist ~/.local/bin/keydist
-```
-
-Then write `~/.config/keydist/keydist.toml` (recommended `chmod 600`) and run `keydist`.
+Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
+`keydist` (see [Install](#install)).
