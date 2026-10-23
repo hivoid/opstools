@@ -2,14 +2,13 @@
 """
 keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
 
-- TOML 仅作清单。secrets 值必须带协议前缀，无前缀一律报错
-  （fail-closed：防止 scheme 拼写错误被静默当作字面量写入消费端）：
-    env:VAR_NAME               进程环境变量
-    envfile:PATH[:KEY]         dotenv 格式文件中的键（单键文件可省略 :KEY）
-    file:PATH                  整文件内容作为值（去末尾换行，适合私钥）
-    str:VALUE                  字面量（明文值的唯一写法，可含 |）
-    ref|ref|ref                回退链：逐个尝试，首个成功者生效
-- TOML 数字/布尔类型的 secret 不可能被误认为引用，仍按字面量处理
+- TOML 仅作清单。secret 值由类型天然区分：裸字符串/数字 = 字面量
+  （布尔渲染为 true/false）；表 = 引用。结构化写法不存在可拼错的 scheme
+  前缀，引用写错必然硬报错（fail-closed）：
+    { env = "VAR_NAME" }                  进程环境变量
+    { envfile = "PATH", key = "KEY" }     dotenv 格式文件中的键（单键文件可省略 key）
+    { file = "PATH" }                     整文件内容作为值（去末尾换行，适合私钥）
+    { chain = [引用或字面量, ...] }        回退链：逐个尝试，首个成功者生效
 - 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
 - 仅在文件内容实际变化时触发 post 事件
 - 每次运行确保目标文件权限为 600
@@ -25,7 +24,7 @@ import tomllib
 
 MASTER = pathlib.Path.home() / ".local/etc/keydist.toml"
 DEFAULT_STYLE = "shell"
-SECRET_SCHEMES = ("env:", "envfile:", "file:", "str:")
+REF_KINDS = ("env", "envfile", "file", "chain")
 
 # ---------------------------------------------------------------------------
 # secret 引用解析
@@ -56,64 +55,98 @@ def parse_env_text(text: str) -> dict[str, str]:
     return pairs
 
 
-def _resolve_one(ref: str) -> tuple[str, None] | tuple[None, str]:
-    """解析单个引用（必须带协议前缀）。返回 (值, 错误)，两者互斥。"""
-    if ref.startswith("env:"):
-        name = ref[4:]
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            return None, f"invalid env var name: {name!r}"
-        v = os.environ.get(name)
-        if v is None:
-            return None, f"environment variable not set: {name}"
-        return v, None
-
-    if ref.startswith("envfile:"):
-        path_str, sep, key = ref[8:].partition(":")
-        path = pathlib.Path(os.path.expanduser(path_str))
-        if not path.exists():
-            return None, f"envfile not found: {path}"
-        pairs = parse_env_text(path.read_text())
-        if sep:
-            if key not in pairs:
-                return None, f"key {key!r} not found in {path}"
-            return pairs[key], None
-        if len(pairs) == 1:
-            return next(iter(pairs.values())), None
-        return None, f"envfile {path} has {len(pairs)} keys; specify envfile:{path}:KEY"
-
-    if ref.startswith("file:"):
-        path = pathlib.Path(os.path.expanduser(ref[5:]))
-        if not path.exists():
-            return None, f"file not found: {path}"
-        return path.read_text().rstrip("\n"), None
-
-    if ref.startswith("str:"):
-        return ref[4:], None
-
-    return None, (f"unknown scheme: {ref!r} (expected {', '.join(SECRET_SCHEMES)}; "
-                  "wrap a literal as str:VALUE)")
+def _resolve_env(name: object) -> tuple[str, None] | tuple[None, str]:
+    """{ env = "NAME" }：进程环境变量。"""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return None, f"invalid env var name: {name!r}"
+    v = os.environ.get(name)
+    if v is None:
+        return None, f"environment variable not set: {name}"
+    return v, None
 
 
-def resolve_secret(value: str) -> tuple[str, None] | tuple[None, str]:
-    """值必须带协议前缀；str: = 字面量，永不按 | 切分（含 | 安全）。
-    其余协议前缀开头的值含 | 时按回退链逐段尝试（段落亦可写 str: 字面量）。
-    注意：回退链段落无法表示含 | 的字面量，此类值请改用 file: 来源。"""
-    if not isinstance(value, str):
-        return str(value), None  # TOML 数字/布尔
-    if value.startswith("str:"):
-        return value[4:], None  # 显式字面量，不做回退链切分
-    if value.startswith(SECRET_SCHEMES) and "|" in value:
-        errs: list[str] = []
-        for part in value.split("|"):
-            ref = part.strip()
-            if not ref:
-                continue
-            v, e = _resolve_one(ref)
-            if v is not None:  # 互斥不变式：值非 None 即成功（Pyright 可收窄 v）
-                return v, None
-            errs.append(f"{ref}: {e}")
-        return None, "all fallbacks failed -> " + "; ".join(errs)
-    return _resolve_one(value)
+def _resolve_envfile(t: dict) -> tuple[str, None] | tuple[None, str]:
+    """{ envfile = "PATH", key = "KEY" }：dotenv 文件中的键（单键文件可省略 key）。"""
+    path_str = t["envfile"]
+    if not isinstance(path_str, str) or not path_str:
+        return None, f"envfile path must be a non-empty string: {path_str!r}"
+    key = t.get("key")
+    if key is not None and not isinstance(key, str):
+        return None, f"envfile key must be a string: {key!r}"
+    path = pathlib.Path(os.path.expanduser(path_str))
+    if not path.exists():
+        return None, f"envfile not found: {path}"
+    pairs = parse_env_text(path.read_text())
+    if key is not None:
+        if key not in pairs:
+            return None, f"key {key!r} not found in {path}"
+        return pairs[key], None
+    if len(pairs) == 1:
+        return next(iter(pairs.values())), None
+    if not pairs:
+        return None, f"envfile {path} contains no key=value pairs"
+    return None, f"envfile {path} has {len(pairs)} keys; specify key = \"...\" explicitly"
+
+
+def _resolve_file(t: dict) -> tuple[str, None] | tuple[None, str]:
+    """{ file = "PATH" }：整文件内容（去末尾换行，适合私钥）。"""
+    path_str = t["file"]
+    if not isinstance(path_str, str) or not path_str:
+        return None, f"file path must be a non-empty string: {path_str!r}"
+    path = pathlib.Path(os.path.expanduser(path_str))
+    if not path.exists():
+        return None, f"file not found: {path}"
+    return path.read_text().rstrip("\n"), None
+
+
+def _resolve_chain(items: object) -> tuple[str, None] | tuple[None, str]:
+    """{ chain = [...] }：逐元素尝试，首个成功者生效。
+    元素与 secret 值同构（字面量或引用表，允许嵌套 chain）。"""
+    if not isinstance(items, list) or not items:
+        return None, "chain must be a non-empty array"
+    errs: list[str] = []
+    for i, item in enumerate(items):
+        v, e = resolve_secret(item)
+        if v is not None:  # 互斥不变式：值非 None 即成功（Pyright 可收窄 v）
+            return v, None
+        errs.append(f"chain[{i}]: {e}")
+    return None, "all fallbacks failed -> " + "; ".join(errs)
+
+
+def _resolve_table(t: dict) -> tuple[str, None] | tuple[None, str]:
+    """引用表：env / envfile(+key) / file / chain 恰选其一，未知或冲突键一律报错。"""
+    present = [k for k in REF_KINDS if k in t]
+    if not present:
+        return None, "reference table must set one of: " + ", ".join(REF_KINDS)
+    if len(present) > 1:
+        return None, f"ambiguous reference: both {present[0]!r} and {present[1]!r} set"
+    kind = present[0]
+    allowed = {kind} | ({"key"} if kind == "envfile" else set())
+    extra = set(t) - allowed
+    if extra:
+        return None, f"unknown key(s) in reference: {', '.join(sorted(extra))}"
+    if kind == "env":
+        return _resolve_env(t["env"])
+    if kind == "envfile":
+        return _resolve_envfile(t)
+    if kind == "file":
+        return _resolve_file(t)
+    return _resolve_chain(t["chain"])
+
+
+def resolve_secret(value: object) -> tuple[str, None] | tuple[None, str]:
+    """裸字符串/数字 = 字面量（布尔渲染为 true/false），由类型天然区分、
+    无前缀可拼错；表 = 引用。返回 (值, 错误)，两者互斥。"""
+    if isinstance(value, str):
+        return value, None
+    if isinstance(value, bool):
+        return ("true" if value else "false"), None
+    if isinstance(value, (int, float)):
+        return str(value), None
+    if isinstance(value, dict):
+        return _resolve_table(value)
+    return None, (f"unsupported secret type: {type(value).__name__} "
+                  "(expected literal or reference table)")
 
 # ---------------------------------------------------------------------------
 # 值格式化（各消费端 .env 解析语义不同，保持上一版设计）
