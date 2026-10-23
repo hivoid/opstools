@@ -91,6 +91,7 @@ chain = [                        # fallback chain: first success wins
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # required; ~ expanded, parents created
+style = "dotenv"                           # optional; shell / dotenv / systemd / docker (overrides inference)
 post = "systemctl --user restart myapp"    # optional; runs only when the file changed
 
 [targets."myapp".vars]                     # consumer key = secret name in [secrets]
@@ -98,6 +99,16 @@ API_KEY     = "api_key"
 DB_PASSWORD = "db_pass"
 DOMAIN      = "domain"
 TLS_CERT    = "tls_cert"
+
+# style omitted -> inferred from the target's name/path/post ("systemd" here,
+# from the systemctl post); falls back to the default "shell" if nothing matches.
+[targets."myapi"]
+path = "/etc/myapi/myapi.env"
+post = "systemctl restart myapi"
+
+[targets."myapi".vars]
+API_KEY = "api_key"
+DOMAIN  = "domain"
 ```
 
 ### Secret forms

@@ -83,6 +83,7 @@ chain = [                        # 回退链：逐个尝试，首个成功者生
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # 必填；展开 ~，自动创建父目录
+style = "dotenv"                           # 可选；shell / dotenv / systemd / docker（覆盖自动推断）
 post = "systemctl --user restart myapp"    # 可选；仅在文件实际变化时执行
 
 [targets."myapp".vars]                     # 消费端键名 = [secrets] 中的 secret 名
@@ -90,6 +91,16 @@ API_KEY     = "api_key"
 DB_PASSWORD = "db_pass"
 DOMAIN      = "domain"
 TLS_CERT    = "tls_cert"
+
+# 省略 style 时按目标的名称/路径/post 自动推断（此处因 systemctl 推断为
+# "systemd"）；均未命中时使用默认 "shell"。
+[targets."myapi"]
+path = "/etc/myapi/myapi.env"
+post = "systemctl restart myapi"
+
+[targets."myapi".vars]
+API_KEY = "api_key"
+DOMAIN  = "domain"
 ```
 
 ### secret 形式
