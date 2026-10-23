@@ -188,16 +188,16 @@ def validate_value(style: str, key: str, value: str) -> tuple[list[str], list[st
     warns: list[str] = []
     if style == "docker":
         if "\n" in value or "\r" in value:
-            errors.append(f"{key}: docker env-file 值不能包含换行（无任何转义机制）")
+            errors.append(f"{key}: docker env-file value must not contain newlines (no escaping)")
         if value != value.strip():
-            errors.append(f"{key}: docker env-file 值不能包含首尾空白")
+            errors.append(f"{key}: docker env-file value must not have leading/trailing whitespace")
         if '"' in value or "'" in value:
-            warns.append(f"{key}: docker run 视引号为字面量而 compose 剥引号，语义不一致，请确认消费端")
+            warns.append(f"{key}: docker run keeps quotes literal while compose strips them; verify the consumer")
         if re.search(r"(?<!\S)#", value):
-            warns.append(f"{key}: 值中的独立 '#' 在 compose 中会被当作行内注释")
+            warns.append(f"{key}: a standalone '#' in the value starts an inline comment under compose")
     elif style == "systemd":
         if "\n" in value or "\r" in value:
-            errors.append(f"{key}: systemd EnvironmentFile 不支持多行值")
+            errors.append(f"{key}: systemd EnvironmentFile does not support multi-line values")
     return errors, warns
 
 
@@ -280,13 +280,14 @@ def write_env_file(path: pathlib.Path, content: str) -> None:
     path.chmod(0o600)
 
 
-def diff_text(path: pathlib.Path, old: str, new: str) -> str:
-    """两份内容的 unified diff（对无结尾换行的行补齐，保证逐行输出）。"""
+def diff_text(path: pathlib.Path, old: str, new: str, indent: str = "    ") -> str:
+    """两份内容的 unified diff（整体缩进并对无结尾换行的行补齐，嵌入目标块内展示）。"""
     lines = difflib.unified_diff(
         old.splitlines(keepends=True), new.splitlines(keepends=True),
         fromfile=f"{path} (current)", tofile=f"{path} (proposed)",
     )
-    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+    return "".join(indent + line if line.endswith("\n") else indent + line + "\n"
+                   for line in lines)
 
 # ---------------------------------------------------------------------------
 # 命令行与清单查找
@@ -317,14 +318,14 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
     if explicit:
         p = pathlib.Path(os.path.expanduser(explicit))
         if not p.exists():
-            print(f"[error] manifest not found: {p}", file=sys.stderr)
+            print(f"error: manifest not found: {p}", file=sys.stderr)
             sys.exit(1)
         return p
     for p in MANIFEST_SEARCH_PATH:
         if p.exists():
             return p
     searched = "\n  ".join(map(str, MANIFEST_SEARCH_PATH))
-    print(f"[error] manifest not found; searched:\n  {searched}\n"
+    print(f"error: manifest not found; searched:\n  {searched}\n"
           "use --config PATH to specify one", file=sys.stderr)
     sys.exit(1)
 
@@ -339,7 +340,7 @@ def main() -> None:
 
     mode = master.stat().st_mode & 0o777
     if mode & 0o077:
-        print(f"[warn] {master} is too permissive ({oct(mode)}); "
+        print(f"warning: {master} is too permissive ({oct(mode)}); "
               "it may contain secret references — chmod 600 recommended", file=sys.stderr)
 
     data = tomllib.loads(master.read_text())
@@ -347,16 +348,23 @@ def main() -> None:
     targets = data.get("targets", {})
 
     if not targets:
-        print("[warn] no targets defined", file=sys.stderr)
+        print("warning: no targets defined", file=sys.stderr)
         return
 
-    failures: list[tuple[str, str]] = []
+    print(f"keydist: manifest {master} ({len(targets)} target(s))")
+    if args.dry_run:
+        print("keydist: DRY-RUN — nothing will be written, no command executed")
 
-    for name, target in targets.items():
+    failures: list[tuple[str, str]] = []
+    counts: dict[str, int] = {}
+
+    for i, (name, target) in enumerate(targets.items()):
+        if i:
+            print()  # 目标块之间空一行，便于扫读
         raw_path = target.get("path")
         if not raw_path:
             msg = "missing required key 'path'"
-            print(f"[error] [{name}] {msg}", file=sys.stderr)
+            print(f"error: {name}: {msg}", file=sys.stderr)
             failures.append((name, msg))
             continue
         path = pathlib.Path(os.path.expanduser(raw_path))
@@ -365,94 +373,90 @@ def main() -> None:
         try:
             style, style_src = resolve_style(name, target)
         except ValueError as e:
-            print(f"[error] [{name}] {e}", file=sys.stderr)
+            print(f"error: {name}: {e}", file=sys.stderr)
             failures.append((name, str(e)))
             continue
-        tag = {"explicit": "", "auto": " (auto-detected)", "default": " (default)"}[style_src]
-        print(f"[{name}] style={style}{tag}")
+        print(f"{name} ({style}, {style_src})")
 
         updates: dict[str, str] = {}
-        missing: list[str] = []
         errors: list[str] = []
         warns: list[str] = []
         for var, src in target.get("vars", {}).items():
             if src not in secrets:
-                missing.append(src)
+                errors.append(f"secret {src!r} not defined in [secrets]")
                 continue
             # 先解析 secret 引用，再做 style 校验
             value, err = resolve_secret(secrets[src])
             if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
-                msg = f"secret {src!r} unresolved: {err}"
-                print(f"[error] [{name}] {msg}", file=sys.stderr)
-                failures.append((name, msg))
+                errors.append(f"secret {src!r} unresolved: {err}")
                 continue
             errs, ws = validate_value(style, var, value)
             errors.extend(errs)
             warns.extend(ws)
             updates[var] = value
 
-        if missing:
-            msg = f"missing secrets in [secrets]: {', '.join(missing)}"
-            print(f"[error] [{name}] {msg}", file=sys.stderr)
-            failures.append((name, msg))
-            continue
-        if errors:
+        if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
             for e in errors:
-                print(f"[error] [{name}] {e}", file=sys.stderr)
+                print(f"  error: {e}", file=sys.stderr)
+                failures.append((name, e))
             continue
-        for w in warns:
-            print(f"  [warn] {w}", file=sys.stderr)
 
-        original, new_content, warns = render_env_file(path, updates, style)
+        original, new_content, render_warns = render_env_file(path, updates, style)
         changed = new_content != original
         if args.dry_run:
             state = "would update" if changed else "unchanged"
-            print(f"[{state}] {name} -> {path} (dry-run)")
-            if changed:
-                sys.stdout.write(diff_text(path, original, new_content))
         else:
             if changed:
                 write_env_file(path, new_content)
             elif path.exists():
                 path.chmod(0o600)  # 内容未变也确保权限为 0600
             state = "updated" if changed else "unchanged"
-            print(f"[{state}] {name} -> {path}")
-        for w in warns:
-            print(f"  [warn] {w}", file=sys.stderr)
+        print(f"  {state:<14}{path}")
+        counts[state] = counts.get(state, 0) + 1
+        if args.dry_run and changed:
+            sys.stdout.write(diff_text(path, original, new_content))
+        for w in warns + render_warns:
+            print(f"  warn: {w}", file=sys.stderr)
 
         post = target.get("post")
         if not post:
             continue
         if not changed:
-            print("  [post] skipped (no changes)")
+            print("  post: skipped (no changes)")
             continue
         if args.dry_run:
-            print(f"  [post] would run: {post}")
+            print(f"  post: would run: {post}")
             continue
 
-        print(f"  [post] {post}")
+        print(f"  post: {post}")
         try:
             result = subprocess.run(
                 shlex.split(post), capture_output=True, text=True, timeout=30, check=False,
             )
         except (OSError, ValueError, subprocess.SubprocessError) as e:
             msg = f"post failed: {e}"
-            print(f"  [error] {msg}", file=sys.stderr)
+            print(f"  error: {msg}", file=sys.stderr)
             failures.append((name, msg))
             continue
 
         if result.returncode != 0:
             msg = f"post exited {result.returncode}: {result.stderr.strip()}"
-            print(f"  [error] {msg}", file=sys.stderr)
+            print(f"  error: {msg}", file=sys.stderr)
             failures.append((name, msg))
         else:
-            print("  [post] ok")
+            print("  post: ok")
 
+    states = ("would update", "unchanged") if args.dry_run else ("updated", "unchanged")
+    tally = ", ".join(f"{counts.get(s, 0)} {s}" for s in states)
+    verdict = "dry-run complete" if args.dry_run else "done"
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)
         for name, msg in failures:
             print(f"  - {name}: {msg}", file=sys.stderr)
+        print(f"{verdict}: {len(targets)} target(s): {tally}; {len(failures)} failed",
+              file=sys.stderr)
         sys.exit(1)
+    print(f"{verdict}: {len(targets)} target(s): {tally}")
 
 
 if __name__ == "__main__":
