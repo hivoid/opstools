@@ -106,7 +106,7 @@ def resolve_secret(value: str) -> tuple[str, None] | tuple[None, str]:
             if not ref:
                 continue
             v, e = _resolve_one(ref)
-            if e is None:
+            if v is not None:  # 互斥不变式：值非 None 即成功（Pyright 可收窄 v）
                 return v, None
             errs.append(f"{ref}: {e}")
         return None, "all fallbacks failed -> " + "; ".join(errs)
@@ -290,7 +290,7 @@ def main() -> None:
                 continue
             # 先解析 secret 引用，再做 style 校验
             value, err = resolve_secret(secrets[src])
-            if err is not None:
+            if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
                 msg = f"secret {src!r} unresolved: {err}"
                 print(f"[error] [{name}] {msg}", file=sys.stderr)
                 failures.append((name, msg))
