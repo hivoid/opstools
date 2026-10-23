@@ -38,6 +38,20 @@ install -m755 keydist ~/.local/bin/keydist
 格式**增量**更新其 `.env` 文件；文件内容实际变化时执行可选的 `post` 命令
 （例如重启服务）。
 
+### 使用场景
+
+- **API 密钥的单一来源** — 本地多个工具（nvim AI 插件、aider、litellm 等）
+  各自读自己的 `.env`，却需要同一批上游密钥。每把密钥只在清单里存一次，
+  keydist 推送到所有消费端，无需手动逐个编辑十几个文件。
+- **同一密钥、不同格式** — 同一个值在 shell `source` 的文件里要写成
+  `KEY='v'`，在 systemd `EnvironmentFile=` 里要写成 `KEY="v"`；keydist
+  从一份清单按目标渲染各自的格式。
+- **一次轮换，处处生效** — 修改密钥真正的来源（env 变量 / dotenv / 文件）
+  后重新运行 keydist：仅重写受影响的文件，并自动执行各目标的 `post`
+  （如重启服务）。
+- **改动前先预览** — `--dry-run` 以 unified diff 展示全部待发生变更，
+  确认无误再落地。
+
 ### 清单格式
 
 给出 `--config PATH` / `-c PATH` 时直接使用该文件（必须存在）；否则按
