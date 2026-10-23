@@ -44,6 +44,22 @@ references, and incrementally updates each consumer's `.env` file in the
 format that consumer understands. When a file's content actually changed,
 an optional `post` command runs (e.g. restart the service).
 
+### Use cases
+
+- **One source of truth for API keys** — several local tools (an nvim AI
+  plugin, aider, litellm, …) each read their own `.env` yet need the same
+  upstream keys. Store each key once in the manifest and let keydist push
+  it everywhere, instead of hand-editing a dozen files.
+- **Same secret, different formats** — the same value must be `KEY='v'` in
+  a shell-sourced file and `KEY="v"` in systemd's `EnvironmentFile=`;
+  keydist renders each target's style from one manifest.
+- **Rotate once, update everywhere** — change the key in whatever it
+  references (env var / dotenv / file), re-run keydist: only affected
+  files are rewritten and their `post` commands (e.g. service restarts)
+  run automatically.
+- **Change with confidence** — `--dry-run` diffs every pending change
+  before anything is touched.
+
 ### Manifest
 
 The manifest is taken from `--config PATH` / `-c PATH` when given (it must
