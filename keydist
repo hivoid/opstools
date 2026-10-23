@@ -2,12 +2,14 @@
 """
 keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
 
-- TOML 仅作清单，secrets 支持引用外部来源，不在主配置中存明文：
+- TOML 仅作清单。secrets 值必须带协议前缀，无前缀一律报错
+  （fail-closed：防止 scheme 拼写错误被静默当作字面量写入消费端）：
     env:VAR_NAME               进程环境变量
     envfile:PATH[:KEY]         dotenv 格式文件中的键（单键文件可省略 :KEY）
     file:PATH                  整文件内容作为值（去末尾换行，适合私钥）
-    str:VALUE                  显式字面量（仅测试用）
+    str:VALUE                  字面量（明文值的唯一写法，可含 |）
     ref|ref|ref                回退链：逐个尝试，首个成功者生效
+- TOML 数字/布尔类型的 secret 不可能被误认为引用，仍按字面量处理
 - 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
 - 仅在文件内容实际变化时触发 post 事件
 - 每次运行确保目标文件权限为 600
@@ -55,7 +57,7 @@ def parse_env_text(text: str) -> dict[str, str]:
 
 
 def _resolve_one(ref: str) -> tuple[str, None] | tuple[None, str]:
-    """解析单个引用。返回 (值, 错误)，两者互斥。"""
+    """解析单个引用（必须带协议前缀）。返回 (值, 错误)，两者互斥。"""
     if ref.startswith("env:"):
         name = ref[4:]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
@@ -88,13 +90,14 @@ def _resolve_one(ref: str) -> tuple[str, None] | tuple[None, str]:
     if ref.startswith("str:"):
         return ref[4:], None
 
-    return ref, None  # 裸字符串 = 字面量（兼容旧行为）
+    return None, (f"unknown scheme: {ref!r} (expected {', '.join(SECRET_SCHEMES)}; "
+                  "wrap a literal as str:VALUE)")
 
 
 def resolve_secret(value: str) -> tuple[str, None] | tuple[None, str]:
-    """支持回退链。str: 前缀 = 显式字面量，永不按 | 切分；
-    仅其余协议前缀开头的值才做回退链切分，故含 | 的裸字面量安全。
-    注意：回退链的段落无法表示含 | 的字面量，此类值请改用 file: 来源。"""
+    """值必须带协议前缀；str: = 字面量，永不按 | 切分（含 | 安全）。
+    其余协议前缀开头的值含 | 时按回退链逐段尝试（段落亦可写 str: 字面量）。
+    注意：回退链段落无法表示含 | 的字面量，此类值请改用 file: 来源。"""
     if not isinstance(value, str):
         return str(value), None  # TOML 数字/布尔
     if value.startswith("str:"):
