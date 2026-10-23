@@ -92,10 +92,13 @@ def _resolve_one(ref: str) -> tuple[str | None, str | None]:
 
 
 def resolve_secret(value: str) -> tuple[str | None, str | None]:
-    """支持回退链。仅当值以协议前缀开头时才做 | 切分，
-    因此含 | 的字面量（无论是否加 str: 前缀）都安全。"""
+    """支持回退链。str: 前缀 = 显式字面量，永不按 | 切分；
+    仅其余协议前缀开头的值才做回退链切分，故含 | 的裸字面量安全。
+    注意：回退链的段落无法表示含 | 的字面量，此类值请改用 file: 来源。"""
     if not isinstance(value, str):
         return str(value), None  # TOML 数字/布尔
+    if value.startswith("str:"):
+        return value[4:], None  # 显式字面量，不做回退链切分
     if value.startswith(SECRET_SCHEMES) and "|" in value:
         errs: list[str] = []
         for part in value.split("|"):
@@ -222,7 +225,10 @@ def update_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
     new_content = "\n".join(new_lines) + ("\n" if new_lines else "")
     changed = new_content != original
     if changed:
-        path.write_text(new_content)
+        # 以 0600 直接创建/截断写入，避免首次创建时短暂出现宽权限文件
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(new_content)
     if path.exists():
         path.chmod(0o600)
 
@@ -256,7 +262,13 @@ def main() -> None:
     failures: list[tuple[str, str]] = []
 
     for name, target in targets.items():
-        path = pathlib.Path(os.path.expanduser(target["path"]))
+        raw_path = target.get("path")
+        if not raw_path:
+            msg = "missing required key 'path'"
+            print(f"[error] [{name}] {msg}", file=sys.stderr)
+            failures.append((name, msg))
+            continue
+        path = pathlib.Path(os.path.expanduser(raw_path))
         path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -276,13 +288,12 @@ def main() -> None:
             if src not in secrets:
                 missing.append(src)
                 continue
-            # ---- 新增：先解析 secret 引用，再做 style 校验 ----
+            # 先解析 secret 引用，再做 style 校验
             value, err = resolve_secret(secrets[src])
             if err is not None:
                 msg = f"secret {src!r} unresolved: {err}"
                 print(f"[error] [{name}] {msg}", file=sys.stderr)
                 failures.append((name, msg))
-                errors.append(msg)
                 continue
             errs, ws = validate_value(style, var, value)
             errors.extend(errs)
