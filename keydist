@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""
+keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
+
+- TOML 仅作清单，secrets 支持引用外部来源，不在主配置中存明文：
+    env:VAR_NAME               进程环境变量
+    envfile:PATH[:KEY]         dotenv 格式文件中的键（单键文件可省略 :KEY）
+    file:PATH                  整文件内容作为值（去末尾换行，适合私钥）
+    str:VALUE                  显式字面量（仅测试用）
+    ref|ref|ref                回退链：逐个尝试，首个成功者生效
+- 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
+- 仅在文件内容实际变化时触发 post 事件
+- 每次运行确保目标文件权限为 600
+"""
+
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+import tomllib
+
+MASTER = pathlib.Path.home() / ".local/etc/keydist.toml"
+DEFAULT_STYLE = "shell"
+SECRET_SCHEMES = ("env:", "envfile:", "file:", "str:")
+
+# ---------------------------------------------------------------------------
+# secret 引用解析
+# ---------------------------------------------------------------------------
+
+def parse_env_text(text: str) -> dict[str, str]:
+    """极简 dotenv 解析：支持 export 前缀、单双引号、转义、注释、空行。"""
+    pairs: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = re.sub(r"^export\s+", "", line)
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            q, inner = val[0], val[1:-1]
+            if q == '"':
+                inner = (inner.replace("\\\\", "\x00").replace('\\"', '"')
+                              .replace("\\n", "\n").replace("\\r", "\r")
+                              .replace("\x00", "\\"))
+            else:
+                inner = inner.replace("'\\''", "'")
+            val = inner
+        pairs[key] = val
+    return pairs
+
+
+def _resolve_one(ref: str) -> tuple[str | None, str | None]:
+    """解析单个引用。返回 (值, 错误)。"""
+    if ref.startswith("env:"):
+        name = ref[4:]
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return None, f"invalid env var name: {name!r}"
+        v = os.environ.get(name)
+        if v is None:
+            return None, f"environment variable not set: {name}"
+        return v, None
+
+    if ref.startswith("envfile:"):
+        path_str, sep, key = ref[8:].partition(":")
+        path = pathlib.Path(os.path.expanduser(path_str))
+        if not path.exists():
+            return None, f"envfile not found: {path}"
+        pairs = parse_env_text(path.read_text())
+        if sep:
+            if key not in pairs:
+                return None, f"key {key!r} not found in {path}"
+            return pairs[key], None
+        if len(pairs) == 1:
+            return next(iter(pairs.values())), None
+        return None, f"envfile {path} has {len(pairs)} keys; specify envfile:{path}:KEY"
+
+    if ref.startswith("file:"):
+        path = pathlib.Path(os.path.expanduser(ref[5:]))
+        if not path.exists():
+            return None, f"file not found: {path}"
+        return path.read_text().rstrip("\n"), None
+
+    if ref.startswith("str:"):
+        return ref[4:], None
+
+    return ref, None  # 裸字符串 = 字面量（兼容旧行为）
+
+
+def resolve_secret(value: str) -> tuple[str | None, str | None]:
+    """支持回退链。仅当值以协议前缀开头时才做 | 切分，
+    因此含 | 的字面量（无论是否加 str: 前缀）都安全。"""
+    if not isinstance(value, str):
+        return str(value), None  # TOML 数字/布尔
+    if value.startswith(SECRET_SCHEMES) and "|" in value:
+        errs: list[str] = []
+        for part in value.split("|"):
+            ref = part.strip()
+            if not ref:
+                continue
+            v, e = _resolve_one(ref)
+            if e is None:
+                return v, None
+            errs.append(f"{ref}: {e}")
+        return None, "all fallbacks failed -> " + "; ".join(errs)
+    return _resolve_one(value)
+
+# ---------------------------------------------------------------------------
+# 值格式化（各消费端 .env 解析语义不同，保持上一版设计）
+# ---------------------------------------------------------------------------
+
+def q_shell(v: str) -> str:
+    """POSIX 单引号：内部纯字面量。兼容 shell source、node/python/Go/Ruby
+    dotenv、systemd、compose——最大兼容超集，故作为默认类别。"""
+    return "'" + v.replace("'", "'\\''") + "'"
+
+
+def q_double(v: str) -> str:
+    """双引号 + 反斜杠转义（\\n 展开为换行）。适用 node/python dotenv、systemd。"""
+    out = v.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\r", "\\r").replace("\n", "\\n")
+    return '"' + out + '"'
+
+
+def q_docker(v: str) -> str:
+    """docker run --env-file：不剥引号、无转义机制，只能裸值。"""
+    return v
+
+
+STYLES: dict[str, dict] = {
+    "shell":   {"allow_export": True,  "quote": q_shell,  "desc": "POSIX shell / source"},
+    "dotenv":  {"allow_export": True,  "quote": q_double, "desc": "node/python/Go/Ruby dotenv"},
+    "systemd": {"allow_export": False, "quote": q_double, "desc": "systemd EnvironmentFile"},
+    "docker":  {"allow_export": False, "quote": q_docker, "desc": "docker run --env-file"},
+}
+
+
+def validate_value(style: str, key: str, value: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warns: list[str] = []
+    if style == "docker":
+        if "\n" in value or "\r" in value:
+            errors.append(f"{key}: docker env-file 值不能包含换行（无任何转义机制）")
+        if value != value.strip():
+            errors.append(f"{key}: docker env-file 值不能包含首尾空白")
+        if '"' in value or "'" in value:
+            warns.append(f"{key}: docker run 视引号为字面量而 compose 剥引号，语义不一致，请确认消费端")
+        if re.search(r"(?<!\S)#", value):
+            warns.append(f"{key}: 值中的独立 '#' 在 compose 中会被当作行内注释")
+    elif style == "systemd":
+        if "\n" in value or "\r" in value:
+            errors.append(f"{key}: systemd EnvironmentFile 不支持多行值")
+    return errors, warns
+
+
+def format_env_line(key: str, value: str, style: str, prefix: str = "") -> str:
+    st = STYLES[style]
+    if not st["allow_export"]:
+        prefix = ""
+    return f"{prefix}{key}={st['quote'](value)}"
+
+# ---------------------------------------------------------------------------
+# style 解析（保持上一版设计：explicit > auto > default）
+# ---------------------------------------------------------------------------
+
+_STYLE_HINTS: list[tuple[str, str]] = [
+    ("systemd", r"systemctl|systemd|\.service\b"),
+    ("docker",  r"docker|compose|podman|container"),
+    ("dotenv",  r"\bnode\b|npm|pnpm|yarn|pm2|next|nuxt|vite|jest"),
+]
+
+
+def resolve_style(name: str, target: dict) -> tuple[str, str]:
+    explicit = target.get("style")
+    if explicit:
+        if explicit not in STYLES:
+            raise ValueError(f"unknown style {explicit!r} (valid: {', '.join(STYLES)})")
+        return explicit, "explicit"
+    hay = " ".join([name, str(target.get("path", "")), str(target.get("post", ""))]).lower()
+    for style, pattern in _STYLE_HINTS:
+        if re.search(pattern, hay):
+            return style, "auto"
+    return DEFAULT_STYLE, "default"
+
+# ---------------------------------------------------------------------------
+# .env 增量更新（保持上一版设计，含重复键清理）
+# ---------------------------------------------------------------------------
+
+def update_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> tuple[bool, list[str]]:
+    original = path.read_text() if path.exists() else ""
+    lines = original.splitlines()
+    replaced: set[str] = set()
+    dropped: list[str] = []
+    new_lines: list[str] = []
+
+    for line in lines:
+        hit = None
+        for key in updates:
+            if re.match(rf"^\s*(?:export\s+)?{re.escape(key)}(?=\s*=)", line):
+                hit = key
+                break
+        if hit is None:
+            new_lines.append(line)
+            continue
+        key = hit
+        if key in replaced:
+            dropped.append(key)
+            continue
+        m = re.match(r"^(\s*(?:export\s+)?)", line)
+        prefix = m.group(1) if STYLES[style]["allow_export"] else ""
+        new_lines.append(format_env_line(key, updates[key], style, prefix))
+        replaced.add(key)
+
+    for key, value in updates.items():
+        if key not in replaced:
+            new_lines.append(format_env_line(key, value, style))
+
+    new_content = "\n".join(new_lines) + ("\n" if new_lines else "")
+    changed = new_content != original
+    if changed:
+        path.write_text(new_content)
+    if path.exists():
+        path.chmod(0o600)
+
+    warns = []
+    if dropped:
+        warns.append("removed stale duplicate key(s): " + ", ".join(sorted(set(dropped))))
+    return changed, warns
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    if not MASTER.exists():
+        print(f"[error] manifest not found: {MASTER}", file=sys.stderr)
+        sys.exit(1)
+
+    mode = MASTER.stat().st_mode & 0o777
+    if mode & 0o077:
+        print(f"[warn] {MASTER} is too permissive ({oct(mode)}); "
+              "it may contain secret references — chmod 600 recommended", file=sys.stderr)
+
+    data = tomllib.loads(MASTER.read_text())
+    secrets = data.get("secrets", {})
+    targets = data.get("targets", {})
+
+    if not targets:
+        print("[warn] no targets defined", file=sys.stderr)
+        return
+
+    failures: list[tuple[str, str]] = []
+
+    for name, target in targets.items():
+        path = pathlib.Path(os.path.expanduser(target["path"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            style, style_src = resolve_style(name, target)
+        except ValueError as e:
+            print(f"[error] [{name}] {e}", file=sys.stderr)
+            failures.append((name, str(e)))
+            continue
+        tag = {"explicit": "", "auto": " (auto-detected)", "default": " (default)"}[style_src]
+        print(f"[{name}] style={style}{tag}")
+
+        updates: dict[str, str] = {}
+        missing: list[str] = []
+        errors: list[str] = []
+        warns: list[str] = []
+        for var, src in target.get("vars", {}).items():
+            if src not in secrets:
+                missing.append(src)
+                continue
+            # ---- 新增：先解析 secret 引用，再做 style 校验 ----
+            value, err = resolve_secret(secrets[src])
+            if err is not None:
+                msg = f"secret {src!r} unresolved: {err}"
+                print(f"[error] [{name}] {msg}", file=sys.stderr)
+                failures.append((name, msg))
+                errors.append(msg)
+                continue
+            errs, ws = validate_value(style, var, value)
+            errors.extend(errs)
+            warns.extend(ws)
+            updates[var] = value
+
+        if missing:
+            msg = f"missing secrets in [secrets]: {', '.join(missing)}"
+            print(f"[error] [{name}] {msg}", file=sys.stderr)
+            failures.append((name, msg))
+            continue
+        if errors:
+            for e in errors:
+                print(f"[error] [{name}] {e}", file=sys.stderr)
+            continue
+        for w in warns:
+            print(f"  [warn] {w}", file=sys.stderr)
+
+        changed, warns = update_env_file(path, updates, style)
+        state = "updated" if changed else "unchanged"
+        print(f"[{state}] {name} -> {path}")
+        for w in warns:
+            print(f"  [warn] {w}", file=sys.stderr)
+
+        post = target.get("post")
+        if not post:
+            continue
+        if not changed:
+            print("  [post] skipped (no changes)")
+            continue
+
+        print(f"  [post] {post}")
+        try:
+            result = subprocess.run(
+                shlex.split(post), capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            msg = f"post failed: {e}"
+            print(f"  [error] {msg}", file=sys.stderr)
+            failures.append((name, msg))
+            continue
+
+        if result.returncode != 0:
+            msg = f"post exited {result.returncode}: {result.stderr.strip()}"
+            print(f"  [error] {msg}", file=sys.stderr)
+            failures.append((name, msg))
+        else:
+            print("  [post] ok")
+
+    if failures:
+        print(f"\n{len(failures)} failure(s):", file=sys.stderr)
+        for name, msg in failures:
+            print(f"  - {name}: {msg}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
