@@ -32,6 +32,26 @@ DEFAULT_STYLE = "shell"
 REF_KINDS = ("env", "envfile", "file", "chain")
 
 # ---------------------------------------------------------------------------
+# 终端着色：stdout/stderr 均为 TTY 且未设 NO_COLOR 时启用；纯 ANSI，零依赖
+# ---------------------------------------------------------------------------
+
+COLOR = (os.environ.get("NO_COLOR") is None
+         and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+         and hasattr(sys.stderr, "isatty") and sys.stderr.isatty())
+
+
+def _c(code: str, s: str) -> str:
+    return f"\x1b[{code}m{s}\x1b[0m" if COLOR else s
+
+
+def bold(s: str) -> str: return _c("1", s)
+def red(s: str) -> str: return _c("31", s)
+def green(s: str) -> str: return _c("32", s)
+def yellow(s: str) -> str: return _c("33", s)
+def cyan(s: str) -> str: return _c("36", s)
+def dim(s: str) -> str: return _c("2", s)
+
+# ---------------------------------------------------------------------------
 # secret 引用解析
 # ---------------------------------------------------------------------------
 
@@ -281,13 +301,22 @@ def write_env_file(path: pathlib.Path, content: str) -> None:
 
 
 def diff_text(path: pathlib.Path, old: str, new: str, indent: str = "    ") -> str:
-    """两份内容的 unified diff（整体缩进并对无结尾换行的行补齐，嵌入目标块内展示）。"""
+    """两份内容的 unified diff（整体缩进、按行着色，无结尾换行的行补齐）。"""
     lines = difflib.unified_diff(
         old.splitlines(keepends=True), new.splitlines(keepends=True),
         fromfile=f"{path} (current)", tofile=f"{path} (proposed)",
     )
-    return "".join(indent + line if line.endswith("\n") else indent + line + "\n"
-                   for line in lines)
+    out = []
+    for line in lines:
+        body = indent + (line if line.endswith("\n") else line + "\n")
+        if line.startswith(("---", "+++", "@@")):
+            body = cyan(body)
+        elif line.startswith("+"):
+            body = green(body)
+        elif line.startswith("-"):
+            body = red(body)
+        out.append(body)
+    return "".join(out)
 
 # ---------------------------------------------------------------------------
 # 命令行与清单查找
@@ -318,14 +347,14 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
     if explicit:
         p = pathlib.Path(os.path.expanduser(explicit))
         if not p.exists():
-            print(f"error: manifest not found: {p}", file=sys.stderr)
+            print(f"{red('error:')} manifest not found: {p}", file=sys.stderr)
             sys.exit(1)
         return p
     for p in MANIFEST_SEARCH_PATH:
         if p.exists():
             return p
     searched = "\n  ".join(map(str, MANIFEST_SEARCH_PATH))
-    print(f"error: manifest not found; searched:\n  {searched}\n"
+    print(f"{red('error:')} manifest not found; searched:\n  {searched}\n"
           "use --config PATH to specify one", file=sys.stderr)
     sys.exit(1)
 
@@ -340,7 +369,7 @@ def main() -> None:
 
     mode = master.stat().st_mode & 0o777
     if mode & 0o077:
-        print(f"warning: {master} is too permissive ({oct(mode)}); "
+        print(f"{yellow('warning:')} {master} is too permissive ({oct(mode)}); "
               "it may contain secret references — chmod 600 recommended", file=sys.stderr)
 
     data = tomllib.loads(master.read_text())
@@ -351,9 +380,9 @@ def main() -> None:
         print("warning: no targets defined", file=sys.stderr)
         return
 
-    print(f"keydist: manifest {master} ({len(targets)} target(s))")
+    print(f"keydist: manifest {bold(str(master))} ({len(targets)} target(s))")
     if args.dry_run:
-        print("keydist: DRY-RUN — nothing will be written, no command executed")
+        print(yellow(bold("keydist: DRY-RUN — nothing will be written, no command executed")))
 
     failures: list[tuple[str, str]] = []
     counts: dict[str, int] = {}
@@ -364,7 +393,7 @@ def main() -> None:
         raw_path = target.get("path")
         if not raw_path:
             msg = "missing required key 'path'"
-            print(f"error: {name}: {msg}", file=sys.stderr)
+            print(f"{red('error:')} {bold(name)}: {msg}", file=sys.stderr)
             failures.append((name, msg))
             continue
         path = pathlib.Path(os.path.expanduser(raw_path))
@@ -373,10 +402,10 @@ def main() -> None:
         try:
             style, style_src = resolve_style(name, target)
         except ValueError as e:
-            print(f"error: {name}: {e}", file=sys.stderr)
+            print(f"{red('error:')} {bold(name)}: {e}", file=sys.stderr)
             failures.append((name, str(e)))
             continue
-        print(f"{name} ({style}, {style_src})")
+        print(bold(name) + dim(f" ({style}, {style_src})"))
 
         updates: dict[str, str] = {}
         errors: list[str] = []
@@ -397,7 +426,7 @@ def main() -> None:
 
         if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
             for e in errors:
-                print(f"  error: {e}", file=sys.stderr)
+                print(f"  {red('error:')} {e}", file=sys.stderr)
                 failures.append((name, e))
             continue
 
@@ -411,52 +440,53 @@ def main() -> None:
             elif path.exists():
                 path.chmod(0o600)  # 内容未变也确保权限为 0600
             state = "updated" if changed else "unchanged"
-        print(f"  {state:<14}{path}")
+        state_color = {"updated": green, "would update": yellow}.get(state, dim)
+        print(f"  {state_color(f'{state:<14}')}{path}")  # 先对齐后着色，避免转义码破坏列宽
         counts[state] = counts.get(state, 0) + 1
         if args.dry_run and changed:
             sys.stdout.write(diff_text(path, original, new_content))
         for w in warns + render_warns:
-            print(f"  warn: {w}", file=sys.stderr)
+            print(f"  {yellow('warn:')} {w}", file=sys.stderr)
 
         post = target.get("post")
         if not post:
             continue
         if not changed:
-            print("  post: skipped (no changes)")
+            print(dim("  post: skipped (no changes)"))
             continue
         if args.dry_run:
-            print(f"  post: would run: {post}")
+            print(f"  {cyan('post:')} {yellow('would run:')} {post}")
             continue
 
-        print(f"  post: {post}")
+        print(f"  {cyan('post:')} {post}")
         try:
             result = subprocess.run(
                 shlex.split(post), capture_output=True, text=True, timeout=30, check=False,
             )
         except (OSError, ValueError, subprocess.SubprocessError) as e:
             msg = f"post failed: {e}"
-            print(f"  error: {msg}", file=sys.stderr)
+            print(f"  {red('error:')} {msg}", file=sys.stderr)
             failures.append((name, msg))
             continue
 
         if result.returncode != 0:
             msg = f"post exited {result.returncode}: {result.stderr.strip()}"
-            print(f"  error: {msg}", file=sys.stderr)
+            print(f"  {red('error:')} {msg}", file=sys.stderr)
             failures.append((name, msg))
         else:
-            print("  post: ok")
+            print(f"  {cyan('post:')} {green('ok')}")
 
     states = ("would update", "unchanged") if args.dry_run else ("updated", "unchanged")
     tally = ", ".join(f"{counts.get(s, 0)} {s}" for s in states)
     verdict = "dry-run complete" if args.dry_run else "done"
     if failures:
-        print(f"\n{len(failures)} failure(s):", file=sys.stderr)
+        print(f"\n{red(f'{len(failures)} failure(s):')}", file=sys.stderr)
         for name, msg in failures:
-            print(f"  - {name}: {msg}", file=sys.stderr)
-        print(f"{verdict}: {len(targets)} target(s): {tally}; {len(failures)} failed",
+            print(f"  - {bold(name)}: {msg}", file=sys.stderr)
+        print(red(f"{verdict}: {len(targets)} target(s): {tally}; {len(failures)} failed"),
               file=sys.stderr)
         sys.exit(1)
-    print(f"{verdict}: {len(targets)} target(s): {tally}")
+    print(green(f"{verdict}: {len(targets)} target(s): {tally}"))
 
 
 if __name__ == "__main__":

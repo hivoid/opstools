@@ -158,6 +158,7 @@ disagree about quote semantics.
   warning).
 - The manifest's permissions are checked at startup; group/world-readable
   modes warn (it may contain secret references).
+- Output is colored on a TTY; disabled when piped or `NO_COLOR` is set.
 - Exit code `0` when every target succeeded, `1` otherwise, with a failure
   summary on stderr.
 
