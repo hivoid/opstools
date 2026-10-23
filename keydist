@@ -54,8 +54,8 @@ def parse_env_text(text: str) -> dict[str, str]:
     return pairs
 
 
-def _resolve_one(ref: str) -> tuple[str | None, str | None]:
-    """解析单个引用。返回 (值, 错误)。"""
+def _resolve_one(ref: str) -> tuple[str, None] | tuple[None, str]:
+    """解析单个引用。返回 (值, 错误)，两者互斥。"""
     if ref.startswith("env:"):
         name = ref[4:]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
@@ -91,7 +91,7 @@ def _resolve_one(ref: str) -> tuple[str | None, str | None]:
     return ref, None  # 裸字符串 = 字面量（兼容旧行为）
 
 
-def resolve_secret(value: str) -> tuple[str | None, str | None]:
+def resolve_secret(value: str) -> tuple[str, None] | tuple[None, str]:
     """支持回退链。str: 前缀 = 显式字面量，永不按 | 切分；
     仅其余协议前缀开头的值才做回退链切分，故含 | 的裸字面量安全。
     注意：回退链的段落无法表示含 | 的字面量，此类值请改用 file: 来源。"""
@@ -214,7 +214,7 @@ def update_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
             dropped.append(key)
             continue
         m = re.match(r"^(\s*(?:export\s+)?)", line)
-        prefix = m.group(1) if STYLES[style]["allow_export"] else ""
+        prefix = m.group(1) if m and STYLES[style]["allow_export"] else ""
         new_lines.append(format_env_line(key, updates[key], style, prefix))
         replaced.add(key)
 
