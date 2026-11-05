@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from datetime import date
@@ -232,7 +233,12 @@ class ListNotesTests(NotesDirTestBase):
         self.tasks_dir.mkdir()
         (self.tasks_dir / "20260101.task.md").write_text("", encoding="utf-8")
         (self.tasks_dir / "global.md").write_text("", encoding="utf-8")  # 任务目录中的普通命名文件不算任务类型
-        self.assertEqual(dly.list_notes("all", "*"), EXPECTED_ALL + ["20260101.task.md"])
+        # 目录分离后：普通类型仅来自 notes_dir，任务类型仅来自 tasks_dir；
+        # notes_dir 中的任务命名文件与 tasks_dir 中的 global.md 均不属于任何类型
+        self.assertEqual(
+            dly.list_notes("all", "*"),
+            ["global.md", "20261105.md", "20260101.task.md", "20251231.md"],
+        )
 
 
 class RunEditorAndViewFileTests(NotesDirTestBase):
@@ -274,11 +280,19 @@ class RunEditorAndViewFileTests(NotesDirTestBase):
         target = self.notes_dir / "global.md"
         target.write_text("hello dly", encoding="utf-8")
         with mock.patch.object(dly, "VIEWER_CMD", ["cat"]):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = dly.view_file(target)
+            # 子进程继承真实的 fd 1，redirect_stdout 捕获不到；需在 fd 级别重定向
+            with tempfile.TemporaryFile("w+") as tmp_out:
+                saved_fd = os.dup(1)
+                try:
+                    os.dup2(tmp_out.fileno(), 1)
+                    code = dly.view_file(target)
+                finally:
+                    os.dup2(saved_fd, 1)
+                    os.close(saved_fd)
+                    tmp_out.seek(0)
+                    captured = tmp_out.read()
         self.assertEqual(code, 0)
-        self.assertEqual(out.getvalue(), "hello dly")
+        self.assertEqual(captured, "hello dly")
 
     def test_view_file_external_cmd_invokes_with_path(self):
         with mock.patch.object(dly, "VIEWER_CMD", ["less", "-R"]):
@@ -424,6 +438,7 @@ class CliOpenTests(NotesDirTestBase):
 
     def test_edit_global_normal_and_task_both_orders(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)
+        self.tasks_dir.mkdir()  # 编辑模式同样要求任务目录存在（PRD 第 2 节）
         cases = (
             (("global",), self.notes_dir / "global.md"),
             (("g",), self.notes_dir / "global.md"),
