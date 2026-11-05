@@ -6,6 +6,7 @@
     dly task|t [打开选项] [日期表达式]
     dly global|g [打开选项]
     dly global|g task|t [打开选项]
+    dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
 
@@ -309,6 +310,7 @@ _USAGE = """\
     dly task|t [打开选项] [日期表达式]
     dly global|g [打开选项]
     dly global|g task|t [打开选项]
+    dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
 
@@ -352,6 +354,27 @@ def _strip_view_flag(args: list[str]) -> tuple[list[str], bool]:
         else:
             rest.append(arg)
     return rest, view
+
+
+def _parse_keywords(rest: list[str]) -> tuple[bool, bool, list[str]]:
+    """解析前导关键字 task|t 与 global|g（各最多出现一次，顺序不限）。
+
+    task|t global|g 与 global|g task|t 两种顺序均识别为全局任务笔记，
+    返回 (是否任务, 是否全局, 剩余参数)。
+    """
+    is_task = False
+    is_global = False
+    idx = 0
+    for arg in rest[:2]:
+        if arg in _TASK_WORDS and not is_task:
+            is_task = True
+            idx += 1
+        elif arg in _GLOBAL_WORDS and not is_global:
+            is_global = True
+            idx += 1
+        else:
+            break
+    return is_task, is_global, rest[idx:]
 
 
 def _looks_like_date_expr(expr: str) -> bool:
@@ -465,37 +488,29 @@ def _run(args: list[str]) -> int:
         # 空参数：普通今天
         return _open_note(normal_note_path(date.today()), view)
 
-    first = rest[0]
+    # 前导关键字：task|t 与 global|g 顺序不限，统一解析
+    is_task, is_global, tail = _parse_keywords(rest)
 
-    if first in _GLOBAL_WORDS:
-        if len(rest) == 1:
-            # global|g：全局普通笔记
-            return _open_note(global_note_path(), view)
-        if rest[1] in _TASK_WORDS:
-            if len(rest) == 2:
-                # global|g task|t：全局任务笔记
-                return _open_note(global_task_path(), view)
-            raise UsageError(f"未知参数: {rest[2]}")
-        raise UsageError(f"未知参数: {rest[1]}")
+    if is_global:
+        # global|g [task|t]：全局普通/任务笔记；global 之后不接受日期表达式
+        if tail:
+            raise UsageError(f"未知参数: {tail[0]}")
+        return _open_note(global_task_path() if is_task else global_note_path(), view)
 
-    if first in _TASK_WORDS:
-        if len(rest) == 1:
-            # task|t：任务今天
+    if is_task:
+        # task|t [日期表达式]：任务今天或任务指定日期
+        if not tail:
             return _open_note(task_note_path(date.today()), view)
-        if rest[1] in _GLOBAL_WORDS:
-            # dly task global：提示正确形式
-            raise UsageError("请使用 dly global task")
-        if len(rest) == 2:
-            # task|t 日期表达式：任务指定日期
-            return _open_note(task_note_path(_resolve_date(rest[1])), view)
-        raise UsageError(f"未知参数: {rest[2]}")
+        if len(tail) == 1:
+            return _open_note(task_note_path(_resolve_date(tail[0])), view)
+        raise UsageError(f"未知参数: {tail[1]}")
 
-    # 首参不是关键字：应为日期表达式（普通指定日期）
+    # 无关键字：应为日期表达式（普通指定日期），只允许一个参数
     if len(rest) > 1:
-        if _looks_like_date_expr(first):
+        if _looks_like_date_expr(rest[0]):
             raise UsageError(f"未知参数: {rest[1]}")
-        raise UsageError(f"未知参数: {first}")
-    return _open_note(normal_note_path(_resolve_date(first)), view)
+        raise UsageError(f"未知参数: {rest[0]}")
+    return _open_note(normal_note_path(_resolve_date(rest[0])), view)
 
 
 def main(argv: list[str]) -> int:
