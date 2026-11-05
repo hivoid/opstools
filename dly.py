@@ -24,7 +24,7 @@
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
 
-当前状态：已实现日期解析、路径生成与列表筛选；CLI 参数解析与编辑/查看操作为待实现的骨架。
+当前状态：日期解析、路径生成、列表筛选与 CLI 参数解析已实现；编辑器/查看器调用（run_editor、view_file）为待实现的骨架。
 """
 
 from __future__ import annotations
@@ -291,12 +291,228 @@ def view_file(path: Path) -> int:
     raise NotImplementedError("view_file 待实现")
 
 
-# ============================== 入口 ==============================
+# ============================== CLI 参数解析与入口 ==============================
+
+# 选项与关键字。手写解析、不使用 argparse，避免 -1、+2w、2026-11-05 被误判为选项
+_VIEW_FLAGS: tuple[str, ...] = ("-v", "--view")
+_TASK_WORDS: tuple[str, ...] = ("task", "t")
+_GLOBAL_WORDS: tuple[str, ...] = ("global", "g")
+_LIST_FLAGS: tuple[str, ...] = ("-l", "--list")
+_ALL_FLAGS: tuple[str, ...] = ("-a", "--all")
+# pattern 缺省值
+_DEFAULT_PATTERN: str = "*"
+
+# 用法说明，用法错误时随错误信息一起输出到 stderr
+_USAGE = """\
+用法：
+    dly [打开选项] [日期表达式]
+    dly task|t [打开选项] [日期表达式]
+    dly global|g [打开选项]
+    dly global|g task|t [打开选项]
+    dly -l|--list [-a|--all] [pattern]
+    dly task|t -l|--list [pattern]
+
+打开选项：
+    -v | --view    仅查看文件内容，不进入编辑
+
+日期表达式：
+    （空）         今天
+    +N / -N[d]     相对今天 ±N 天
+    +Nw / -Nw      相对今天 ±N 周
+    +Nm / -Nm      相对今天 ±N 个日历月
+    +Ny / -Ny      相对今天 ±N 个日历年
+    DD             当前年、当前月的第 DD 日
+    MMDD           当前年的指定月日
+    YYMMDD         20YY 年的指定月日
+    YYYYMMDD       完整日期
+    YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
+"""
+
+
+class UsageError(Exception):
+    """用法错误；main 捕获后输出错误信息与用法说明到 stderr，退出码 1。"""
+
+
+class DateError(Exception):
+    """无效日期，消息形如“无效日期: <表达式>”，退出码 1。"""
+
+
+def _strip_view_flag(args: list[str]) -> tuple[list[str], bool]:
+    """按 PRD 5.2 剥离最多一个 -v/--view，返回 (剩余参数, 是否查看模式)。
+
+    -v/--view 可出现在任意位置；重复出现按用法错误处理。
+    """
+    rest: list[str] = []
+    view = False
+    for arg in args:
+        if arg in _VIEW_FLAGS:
+            if view:
+                raise UsageError("重复使用 -v/--view")
+            view = True
+        else:
+            rest.append(arg)
+    return rest, view
+
+
+def _looks_like_date_expr(expr: str) -> bool:
+    """判断表达式是否匹配 PRD 7.1 的某种日期格式（不校验日期值合法性）。
+
+    用于区分“格式不符”（按用法错误处理）与“格式相符但日期非法”
+    （按无效日期处理，如 20261301）。
+    """
+    if _RELATIVE_RE.match(expr) is not None:
+        return True
+    if re.fullmatch(r"\d{1,2}|\d{3,4}|\d{6}|\d{8}", expr) is not None:
+        return True
+    return re.fullmatch(r"\d{4}[-/.]\d{2}[-/.]\d{2}", expr) is not None
+
+
+def _resolve_date(expr: str) -> date:
+    """解析日期表达式；格式不符按用法错误，格式相符但日期非法按无效日期处理。"""
+    try:
+        return parse_date_expr(expr, date.today())
+    except (ValueError, OverflowError):
+        if _looks_like_date_expr(expr):
+            raise DateError(f"无效日期: {expr}") from None
+        raise UsageError(f"未知参数: {expr}") from None
+
+
+def _dir_label(target: Path) -> str:
+    """返回目标文件所属目录的提示标签：“笔记目录”或“任务目录”。
+
+    仅当任务目录独立配置（TASK_DIR 非 None）且目标位于任务目录时才使用
+    “任务目录”；两目录共用时一律视为“笔记目录”。
+    """
+    if TASK_DIR is not None and target.parent == _task_dir():
+        return "任务目录"
+    return "笔记目录"
+
+
+def _open_note(path: Path, view: bool) -> int:
+    """编辑或查看目标笔记，返回退出码。
+
+    所在目录不存在时抛出 NotesDirError（编辑与查看均要求目录存在）；
+    查看模式要求文件已存在，编辑模式是否创建文件交由编辑器决定。
+    """
+    if not path.parent.is_dir():
+        raise NotesDirError(f"{_dir_label(path)}不存在: {path.parent}")
+    if view:
+        if not path.is_file():
+            print(f"文件不存在: {path}", file=sys.stderr)
+            return 1
+        return view_file(path)
+    return run_editor(path)
+
+
+def _run_list(rest: list[str], base: str) -> int:
+    """执行列表命令并输出结果，返回退出码。
+
+    base 为 "normal"（dly -l / dly global -l）或 "task"（dly task -l）。
+    """
+    # 列表模式不允许 -v / --view
+    for arg in rest:
+        if arg in _VIEW_FLAGS:
+            raise UsageError("列表模式不支持 -v/--view")
+    if base == "task":
+        # 任务列表形式：dly task -l [pattern]，不支持 -a/--all
+        if len(rest) > 1:
+            raise UsageError(f"未知参数: {rest[1]}")
+        if rest and rest[0] in _ALL_FLAGS:
+            raise UsageError("任务列表不支持 -a/--all")
+        if rest and rest[0].startswith("-"):
+            raise UsageError(f"未知参数: {rest[0]}")
+        list_type = "task"
+        pattern = rest[0] if rest else _DEFAULT_PATTERN
+    else:
+        # 普通列表形式：dly -l [-a|--all] [pattern]
+        pending = list(rest)
+        all_types = False
+        if pending and pending[0] in _ALL_FLAGS:
+            all_types = True
+            pending = pending[1:]
+        if pending and pending[0] in _ALL_FLAGS:
+            raise UsageError("重复使用 -a/--all")
+        if len(pending) > 1:
+            raise UsageError(f"未知参数: {pending[1]}")
+        if pending and pending[0].startswith("-"):
+            raise UsageError(f"未知参数: {pending[0]}")
+        list_type = "all" if all_types else "normal"
+        pattern = pending[0] if pending else _DEFAULT_PATTERN
+    names = list_notes(list_type, pattern)
+    if not names:
+        print(f"没有匹配的文件: {pattern}", file=sys.stderr)
+        return 1
+    for name in names:
+        print(name)
+    return 0
+
+
+def _run(args: list[str]) -> int:
+    """按 PRD 第 4、5 节解析参数并分发执行，返回退出码。"""
+    # ---- 列表模式识别（优先于 -v 剥离；列表模式不允许 -v）----
+    if args and args[0] in _LIST_FLAGS:
+        return _run_list(args[1:], "normal")
+    if len(args) >= 2 and args[0] in _TASK_WORDS and args[1] in _LIST_FLAGS:
+        return _run_list(args[2:], "task")
+    if len(args) >= 2 and args[0] in _GLOBAL_WORDS and args[1] in _LIST_FLAGS:
+        # dly global -l / dly g -l：等同普通列表形式
+        return _run_list(args[2:], "normal")
+
+    # ---- 打开 / 查看模式：剥离最多一个 -v/--view 后按形式解析 ----
+    rest, view = _strip_view_flag(args)
+
+    if not rest:
+        # 空参数：普通今天
+        return _open_note(normal_note_path(date.today()), view)
+
+    first = rest[0]
+
+    if first in _GLOBAL_WORDS:
+        if len(rest) == 1:
+            # global|g：全局普通笔记
+            return _open_note(global_note_path(), view)
+        if rest[1] in _TASK_WORDS:
+            if len(rest) == 2:
+                # global|g task|t：全局任务笔记
+                return _open_note(global_task_path(), view)
+            raise UsageError(f"未知参数: {rest[2]}")
+        raise UsageError(f"未知参数: {rest[1]}")
+
+    if first in _TASK_WORDS:
+        if len(rest) == 1:
+            # task|t：任务今天
+            return _open_note(task_note_path(date.today()), view)
+        if rest[1] in _GLOBAL_WORDS:
+            # dly task global：提示正确形式
+            raise UsageError("请使用 dly global task")
+        if len(rest) == 2:
+            # task|t 日期表达式：任务指定日期
+            return _open_note(task_note_path(_resolve_date(rest[1])), view)
+        raise UsageError(f"未知参数: {rest[2]}")
+
+    # 首参不是关键字：应为日期表达式（普通指定日期）
+    if len(rest) > 1:
+        if _looks_like_date_expr(first):
+            raise UsageError(f"未知参数: {rest[1]}")
+        raise UsageError(f"未知参数: {first}")
+    return _open_note(normal_note_path(_resolve_date(first)), view)
 
 
 def main(argv: list[str]) -> int:
-    """解析命令行参数并分发到对应功能，返回进程退出码。（待实现）"""
-    raise NotImplementedError("main 待实现")
+    """解析命令行参数并分发执行，返回进程退出码。
+
+    用法错误时向 stderr 输出错误信息与用法说明并返回 1；无效日期、
+    目录不存在、文件不存在等错误仅输出对应错误信息并返回 1。
+    """
+    try:
+        return _run(list(argv))
+    except UsageError as exc:
+        print(exc, file=sys.stderr)
+        print(_USAGE, file=sys.stderr, end="")
+        return 1
+    except (DateError, NotesDirError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
