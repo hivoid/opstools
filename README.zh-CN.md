@@ -11,6 +11,7 @@ English: [README.md](README.md)
 | 工具 | 语言 | 说明 |
 | --- | --- | --- |
 | [keydist](#keydist) | Python 3.11+ | 把一份集中清单里的 secrets 增量分发到各消费端的 `.env` 文件，内容变化时执行 post 命令 |
+| [dly](#dly) | Python 3.8+ | 打开、查看、列出每日笔记与任务笔记；简短日期表达式，编辑器与查看命令可配置 |
 
 ## 设计原则
 
@@ -28,6 +29,7 @@ English: [README.md](README.md)
 
 ```bash
 install -m755 keydist ~/.local/bin/keydist
+install -m755 dly.py ~/.local/bin/dly
 ```
 
 ---
@@ -156,3 +158,76 @@ keydist -c ~/alt.toml   # 显式指定清单
 
 编写 `~/.config/keydist/keydist.toml`（建议 `chmod 600`），然后运行
 `keydist`（安装见[安装](#安装)）。
+
+---
+
+## dly
+
+`dly` 是每日笔记与任务笔记的命令行入口：计算日期、定位文件、调用编辑器
+或分页器，本身不解析、不修改笔记内容。普通笔记与任务笔记可共用一个目录，
+也可为任务笔记单独配置目录；全部配置集中在脚本最前端。
+
+### 使用场景
+
+- **一条命令写日记** — `dly` 直接打开今天的 `YYYYMMDD.md`；`dly 1105`、
+  `dly +1m`、`dly 2026-11-05` 等简短表达式免去算日期、拼路径的步骤。
+- **日记与任务分离** — `dly task` 操作 `YYYYMMDD.task.md`，可为任务笔记
+  配置独立目录，与普通笔记互不混杂。
+- **全局笔记** — `dly global`、`dly g t` 打开不带日期的 `global.md` 与
+  `global.task.md`。
+- **只读回顾与盘点** — `dly -v` 只查看不编辑；`dly -l -a 2026` 按子串或
+  glob 筛选文件名，快速盘点已有笔记。
+
+### 配置
+
+配置集中在脚本最前端（不读环境变量、无配置文件），按需修改后直接使用：
+
+```python
+NOTES_DIR  = Path.home() / "Documents/notes/daily"  # 普通笔记目录（含 global.md）
+TASK_DIR   = None                # None = 与 NOTES_DIR 共用；也可设为独立目录
+EDITOR_CMD = ["nvim"]            # 编辑器命令，可带参数，如 ["code", "--wait"]
+VIEWER_CMD = None                # None = 使用标准库 pydoc.pager；或 ["less", "-R"]
+```
+
+脚本不自动创建目录：目录不存在时硬报错退出。编辑模式下目标文件不存在时
+交由编辑器决定是否创建；查看模式下文件不存在则报错退出。
+
+### 文件命名
+
+| 类型 | 文件名 | 示例 |
+| --- | --- | --- |
+| 普通日期笔记 | `YYYYMMDD.md` | `20261105.md` |
+| 日期任务笔记 | `YYYYMMDD.task.md` | `20261105.task.md` |
+| 全局普通笔记 | `global.md` | — |
+| 全局任务笔记 | `global.task.md` | — |
+
+### 日期表达式
+
+| 表达式 | 含义 | 示例（今天为 2026-11-05） |
+| --- | --- | --- |
+| （空） | 今天 | → `20261105.md` |
+| `±N[d]` / `±Nw` / `±Nm` / `±Ny` | 相对今天 ±N 天/周/月/年 | `+1m` → 2026-12-05 |
+| `DD` / `MMDD` / `YYMMDD` | 本月某日 / 今年月日 / 20YY 年月日 | `110312` → 2011-03-12 |
+| `YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` | 完整日期，年份不限 | `19991231` |
+
+月、年加减按日历进行：目标月不存在该日时截断到月末（2026-01-31 执行
+`+1m` 得 2026-02-28）；2 月 29 日落到非闰年时取 2 月 28 日。
+
+### 用法
+
+```bash
+dly                            # 编辑今天普通笔记
+dly -v 2026-11-05              # 查看指定日期笔记
+dly task                       # 编辑今天任务笔记
+dly t -v +1w                   # 查看下周任务笔记
+dly global task                # 编辑 global.task.md（dly task global 亦可）
+dly -l                         # 列出普通笔记文件名（字典序逆序）
+dly -l -a 2026                 # 全部类型中筛选文件名含 2026 的文件
+dly task -l '*01.task.md'      # 任务类型，按 glob 模式筛选
+```
+
+- `-v` / `--view` 只读查看：默认用标准库 `pydoc.pager` 分页，配置
+  `VIEWER_CMD` 后改用外部命令；文件不存在报错退出。
+- `-l` / `--list` 每行输出一个文件名，按字典序逆序；pattern 不含
+  `* ? [` 时按 `*pattern*` 子串匹配，否则按 glob 匹配；无匹配退出码 1。
+- 编辑器与查看命令的退出码原样作为脚本退出码。
