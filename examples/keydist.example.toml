@@ -1,0 +1,20 @@
+# keydist 示例清单 —— 零配置体验完整分发流程：
+#
+#   keydist -c examples/keydist.example.toml --dry-run
+#
+# 建议在仓库根目录运行。--dry-run 只打印 unified diff 与将要执行的 post
+# 命令，不写文件、不执行命令；去掉 --dry-run 前请先把 path 改为你自己的
+# 消费端 .env 路径（本演示路径位于仓库内，便于发现误写入）。
+
+[secrets]
+domain = "example.com"                                          # 裸字符串 = 字面量
+# 回退链：优先取环境变量 MYAPP_API_KEY，未设置时落到字面量（演示用）。
+api_key = { chain = [{ env = "MYAPP_API_KEY" }, "demo-key-12345"] }
+
+[targets."demo"]
+path = "examples/demo.env"          # 演示目标；实际使用请改为消费者 .env 路径
+post = "echo 'demo.env updated'"    # 演示 post；实际使用如 systemctl --user restart myapp
+
+[targets."demo".vars]
+API_KEY = "api_key"                 # 消费端键名 = [secrets] 中的 secret 名
+DOMAIN  = "domain"
