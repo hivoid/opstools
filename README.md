@@ -13,6 +13,7 @@ over time.
 | Tool | Language | Description |
 | --- | --- | --- |
 | [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change |
+| [dly](#dly) | Python 3.8+ | Open, view, and list daily notes and task notes; short date expressions, configurable editor and viewer |
 
 ## Principles
 
@@ -33,6 +34,7 @@ repository into `~/.local/bin`:
 
 ```bash
 install -m755 keydist ~/.local/bin/keydist
+install -m755 dly.py ~/.local/bin/dly
 ```
 
 ---
@@ -174,3 +176,84 @@ keydist -c ~/alt.toml   # use an explicit manifest
 
 Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
 `keydist` (see [Install](#install)).
+
+---
+
+## dly
+
+`dly` is a command-line entry point for daily notes and task notes: it
+computes dates, locates files, and invokes your editor or pager — it never
+parses or modifies note content. Regular and task notes can share one
+directory or live apart; all configuration sits at the top of the script.
+
+### Use cases
+
+- **One command for today's diary** — `dly` opens today's `YYYYMMDD.md`
+  directly; short expressions like `dly 1105`, `dly +1m`, or
+  `dly 2026-11-05` spare you date arithmetic and path typing.
+- **Diary and tasks, kept apart** — `dly task` works on `YYYYMMDD.task.md`,
+  optionally in its own directory, never mixing with regular notes.
+- **Global notes** — `dly global` and `dly g t` open the date-less
+  `global.md` and `global.task.md`.
+- **Read-only review** — `dly -v` views without editing; `dly -l -a 2026`
+  filters file names by substring or glob to survey existing notes.
+
+### Configuration
+
+Everything is configured at the top of the script (no env vars, no config
+files) — edit and use:
+
+```python
+NOTES_DIR  = Path.home() / "Documents/notes/daily"  # regular notes (holds global.md)
+TASK_DIR   = None                # None = share NOTES_DIR; or a separate directory
+EDITOR_CMD = ["nvim"]            # editor command, args allowed: ["code", "--wait"]
+VIEWER_CMD = None                # None = stdlib pydoc.pager; or ["less", "-R"]
+```
+
+Directories are never created automatically: a missing directory is a hard
+error. In edit mode a missing target file is left for the editor to create;
+in view mode a missing file exits with an error.
+
+### File names
+
+| Kind | File name | Example |
+| --- | --- | --- |
+| Regular daily note | `YYYYMMDD.md` | `20261105.md` |
+| Daily task note | `YYYYMMDD.task.md` | `20261105.task.md` |
+| Global regular note | `global.md` | — |
+| Global task note | `global.task.md` | — |
+
+### Date expressions
+
+| Expression | Meaning | Example (today: 2026-11-05) |
+| --- | --- | --- |
+| (empty) | today | → `20261105.md` |
+| `±N[d]` / `±Nw` / `±Nm` / `±Ny` | ±N days/weeks/months/years from today | `+1m` → 2026-12-05 |
+| `DD` / `MMDD` / `YYMMDD` | day this month / month-day this year / 20YY month-day | `110312` → 2011-03-12 |
+| `YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` | full date, any year | `19991231` |
+
+Month and year arithmetic follow the calendar: a day missing in the target
+month is clamped to the month's end (`+1m` from 2026-01-31 gives
+2026-02-28); Feb 29 shifted onto a non-leap year becomes Feb 28.
+
+### Usage
+
+```bash
+dly                            # edit today's regular note
+dly -v 2026-11-05              # view the note for a given date
+dly task                       # edit today's task note
+dly t -v +1w                   # view next week's task note
+dly global task                # edit global.task.md (dly task global works too)
+dly -l                         # list regular note file names (reverse order)
+dly -l -a 2026                 # all kinds, file names containing 2026
+dly task -l '*01.task.md'      # task kind, glob pattern
+```
+
+- `-v` / `--view` is read-only: pages with the stdlib `pydoc.pager` by
+  default, or the configured `VIEWER_CMD`; a missing file exits with an
+  error.
+- `-l` / `--list` prints one file name per line in reverse lexicographic
+  order; a pattern without `* ? [` is matched as `*pattern*`, otherwise as
+  a glob; no match exits `1`.
+- The editor's and viewer command's exit codes are passed through as the
+  script's exit code.
