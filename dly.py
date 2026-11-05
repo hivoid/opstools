@@ -25,14 +25,16 @@
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
 
-当前状态：日期解析、路径生成、列表筛选与 CLI 参数解析已实现；编辑器/查看器调用（run_editor、view_file）为待实现的骨架。
+当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用与 CLI 参数解析均已实现。
 """
 
 from __future__ import annotations
 
 import calendar
 import fnmatch
+import pydoc
 import re
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -283,13 +285,44 @@ def list_notes(list_type: str, pattern: str) -> list[str]:
 
 
 def run_editor(path: Path) -> int:
-    """使用 EDITOR_CMD 编辑目标文件，返回编辑器退出码。（待实现）"""
-    raise NotImplementedError("run_editor 待实现")
+    """使用 EDITOR_CMD 编辑目标文件，返回编辑器退出码。
+
+    调用形式为 EDITOR_CMD + [str(path)]，继承 stdin/stdout/stderr；
+    文件不存在不报错，是否创建交由编辑器决定。编辑器命令启动失败时
+    向 stderr 输出错误信息，返回 1。
+    """
+    cmd = [*EDITOR_CMD, str(path)]
+    try:
+        result = subprocess.run(cmd)
+    except OSError as exc:
+        print(f"编辑器启动失败: {EDITOR_CMD}: {exc}", file=sys.stderr)
+        return 1
+    return result.returncode
 
 
 def view_file(path: Path) -> int:
-    """使用 VIEWER_CMD 或 pydoc.pager 查看目标文件内容，返回退出码。（待实现）"""
-    raise NotImplementedError("view_file 待实现")
+    """查看目标文件内容，返回退出码。
+
+    VIEWER_CMD 为 None 时读取文件内容（UTF-8，解码错误用 replace）后
+    调用标准库 pydoc.pager；否则调用外部查看命令 VIEWER_CMD + [str(path)]，
+    继承 stdin/stdout/stderr，其退出码作为返回值。查看命令启动失败时
+    向 stderr 输出错误信息，返回 1。
+    """
+    if VIEWER_CMD is None:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"无法读取文件: {path}: {exc}", file=sys.stderr)
+            return 1
+        pydoc.pager(text)
+        return 0
+    cmd = [*VIEWER_CMD, str(path)]
+    try:
+        result = subprocess.run(cmd)
+    except OSError as exc:
+        print(f"查看命令启动失败: {VIEWER_CMD}: {exc}", file=sys.stderr)
+        return 1
+    return result.returncode
 
 
 # ============================== CLI 参数解析与入口 ==============================
