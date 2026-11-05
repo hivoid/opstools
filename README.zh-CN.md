@@ -40,6 +40,29 @@ install -m755 dly.py ~/.local/bin/dly
 格式**增量**更新其 `.env` 文件；文件内容实际变化时执行可选的 `post` 命令
 （例如重启服务）。
 
+### 十秒看效果
+
+仓库自带一份演示清单，一条命令即可看到完整流程——待发生变更的 diff 与
+将要执行的 post 命令，不写任何文件、不执行任何命令：
+
+```bash
+keydist -c examples/keydist.example.toml --dry-run
+```
+
+```console
+keydist: manifest examples/keydist.example.toml (1 target(s))
+keydist: DRY-RUN — nothing will be written, no command executed
+demo (shell, default)
+  would update  examples/demo.env
+    --- examples/demo.env (current)
+    +++ examples/demo.env (proposed)
+    @@ -0,0 +1,2 @@
+    +API_KEY='demo-key-12345'
+    +DOMAIN='example.com'
+  post: would run: echo 'demo.env updated'
+dry-run complete: 1 target(s): would update 1, unchanged 0
+```
+
 ### 使用场景
 
 - **API 密钥的单一来源** — 本地多个工具（nvim AI 插件、aider、litellm 等）
@@ -159,6 +182,36 @@ keydist -c ~/alt.toml   # 显式指定清单
 编写 `~/.config/keydist/keydist.toml`（建议 `chmod 600`），然后运行
 `keydist`（安装见[安装](#安装)）。
 
+### 速查表
+
+| 命令 | 作用 |
+| --- | --- |
+| `keydist` | 按查找顺序定位清单并执行分发 |
+| `keydist -c PATH` | 使用显式清单 |
+| `keydist --dry-run` | 预览 diff 与 post 命令，不做任何改动 |
+| `keydist -n -c PATH` | 同上，使用显式清单 |
+
+### FAQ
+
+**Windows 下能用吗？**
+
+面向 Linux/macOS：post 经 `shlex` 切分后走 POSIX shell，典型场景是
+`systemctl`；未在 Windows 上验证。
+
+**某个 secret 解析失败会怎样？**
+
+整个目标在写入前即被放弃（fail closed）；本次运行退出码 `1`，stderr
+打印失败汇总。
+
+**每次运行都会重写所有文件吗？**
+
+不会——只有渲染结果与现有内容不同才写入；未变化的目标保持 mtime 并
+跳过 `post`。
+
+**为什么清单权限过宽会告警？**
+
+清单里可能含 secret 引用；组/其他用户可读时告警，建议 `chmod 600`。
+
 ---
 
 ## dly
@@ -166,6 +219,33 @@ keydist -c ~/alt.toml   # 显式指定清单
 `dly` 是每日笔记与任务笔记的命令行入口：计算日期、定位文件、调用编辑器
 或分页器，本身不解析、不修改笔记内容。普通笔记与任务笔记可共用一个目录，
 也可为任务笔记单独配置目录；全部配置集中在脚本最前端。
+
+### 十秒看效果
+
+默认 `NOTES_DIR`（`~/Documents/notes/daily`）下已有若干笔记时，列表与查看
+完全不需要打开编辑器：
+
+```console
+$ dly -l -a            # 全部类型，字典序逆序
+global.task.md
+global.md
+20261105.task.md
+20261105.md
+20261001.task.md
+20251231.md
+
+$ dly -l 2026          # 普通类型，文件名含 "2026"
+20261105.md
+```
+
+动手试一试——查看与列表均为只读，不会改动任何笔记：
+
+```bash
+mkdir -p ~/Documents/notes/daily            # dly 不会自动创建目录
+printf 'hello dly\n' > ~/Documents/notes/daily/20261105.md
+dly -v 20261105                             # 用内置分页器查看
+dly -l 2026                                 # 列出匹配的文件名
+```
 
 ### 使用场景
 
@@ -231,3 +311,36 @@ dly task -l '*01.task.md'      # 任务类型，按 glob 模式筛选
 - `-l` / `--list` 每行输出一个文件名，按字典序逆序；pattern 不含
   `* ? [` 时按 `*pattern*` 子串匹配，否则按 glob 匹配；无匹配退出码 1。
 - 编辑器与查看命令的退出码原样作为脚本退出码。
+
+### 速查表
+
+| 命令 | 作用 |
+| --- | --- |
+| `dly` | 编辑今天的普通笔记（`YYYYMMDD.md`） |
+| `dly 1105` / `dly +1m` | 编辑对应日期的普通笔记 |
+| `dly task` / `dly t` | 编辑今天的任务笔记 |
+| `dly g t` | 编辑 `global.task.md`（`task global` 亦可） |
+| `dly -v …` | 以上任意形式，改为只读查看 |
+| `dly -l [-a] [pattern]` | 列出普通 / 全部类型 |
+| `dly task -l [pattern]` | 列出任务类型 |
+
+### FAQ
+
+**为什么不自动创建目录和文件？**
+
+刻意为之：目录缺失一律硬报错，编辑模式下文件创建交给编辑器——绝不产生
+意外产物。
+
+**`+1m` 以哪一天为基准？**
+
+始终是今天；相对日期没有锚点参数。`dly 1105` 指当前年的 11 月 5 日。
+
+**退出码如何约定？**
+
+成功为 `0`；用法错误、无效日期、目录/文件缺失、列表无匹配为 `1`；
+编辑器与查看命令的退出码原样透传。
+
+**Windows 下能用吗？**
+
+可以——纯标准库。把 `EDITOR_CMD` 指向任意编辑器，`VIEWER_CMD` 可设为
+如 `["more.com"]`；各平台示例见脚本注释。

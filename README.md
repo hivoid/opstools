@@ -46,6 +46,30 @@ references, and incrementally updates each consumer's `.env` file in the
 format that consumer understands. When a file's content actually changed,
 an optional `post` command runs (e.g. restart the service).
 
+### See it in 10 seconds
+
+The repository ships a demo manifest. One command shows the whole
+workflow — diffs of pending changes plus the post commands that would run —
+with nothing written and nothing executed:
+
+```bash
+keydist -c examples/keydist.example.toml --dry-run
+```
+
+```console
+keydist: manifest examples/keydist.example.toml (1 target(s))
+keydist: DRY-RUN — nothing will be written, no command executed
+demo (shell, default)
+  would update  examples/demo.env
+    --- examples/demo.env (current)
+    +++ examples/demo.env (proposed)
+    @@ -0,0 +1,2 @@
+    +API_KEY='demo-key-12345'
+    +DOMAIN='example.com'
+  post: would run: echo 'demo.env updated'
+dry-run complete: 1 target(s): would update 1, unchanged 0
+```
+
 ### Use cases
 
 - **One source of truth for API keys** — several local tools (an nvim AI
@@ -177,6 +201,38 @@ keydist -c ~/alt.toml   # use an explicit manifest
 Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
 `keydist` (see [Install](#install)).
 
+### Cheatsheet
+
+| Command | Effect |
+| --- | --- |
+| `keydist` | apply the manifest found via the lookup order |
+| `keydist -c PATH` | apply an explicit manifest |
+| `keydist --dry-run` | preview diffs and post commands; touch nothing |
+| `keydist -n -c PATH` | same, with an explicit manifest |
+
+### FAQ
+
+**Does it run on Windows?**
+
+It targets Linux/macOS: `post` commands are split with `shlex` and run
+through a POSIX shell, and the typical use case is `systemctl`. Not
+verified on Windows.
+
+**What happens when a secret fails to resolve?**
+
+That whole target is abandoned before anything is written (fail closed);
+the run exits `1` with a failure summary on stderr.
+
+**Does it rewrite every file on every run?**
+
+No — a file is written only when its rendered content actually differs;
+unchanged targets keep their mtime and skip `post`.
+
+**Why the permission warning about the manifest?**
+
+It may contain secret references; group/world-readable modes warn.
+`chmod 600` is recommended.
+
 ---
 
 ## dly
@@ -185,6 +241,33 @@ Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
 computes dates, locates files, and invokes your editor or pager — it never
 parses or modifies note content. Regular and task notes can share one
 directory or live apart; all configuration sits at the top of the script.
+
+### See it in 10 seconds
+
+With a few notes already in the default `NOTES_DIR`
+(`~/Documents/notes/daily`), listing and viewing need no editor at all:
+
+```console
+$ dly -l -a            # all kinds, reverse lexicographic order
+global.task.md
+global.md
+20261105.task.md
+20261105.md
+20261001.task.md
+20251231.md
+
+$ dly -l 2026          # regular kind, names containing "2026"
+20261105.md
+```
+
+Try it for real — viewing and listing are read-only, nothing gets edited:
+
+```bash
+mkdir -p ~/Documents/notes/daily            # dly never creates directories
+printf 'hello dly\n' > ~/Documents/notes/daily/20261105.md
+dly -v 20261105                             # view it with the built-in pager
+dly -l 2026                                 # list matching file names
+```
 
 ### Use cases
 
@@ -257,3 +340,39 @@ dly task -l '*01.task.md'      # task kind, glob pattern
   a glob; no match exits `1`.
 - The editor's and viewer command's exit codes are passed through as the
   script's exit code.
+
+### Cheatsheet
+
+| Command | Effect |
+| --- | --- |
+| `dly` | edit today's regular note (`YYYYMMDD.md`) |
+| `dly 1105` / `dly +1m` | edit that date's regular note |
+| `dly task` / `dly t` | edit today's task note |
+| `dly g t` | edit `global.task.md` (`task global` works too) |
+| `dly -v …` | any of the above, view-only |
+| `dly -l [-a] [pattern]` | list regular / all kinds |
+| `dly task -l [pattern]` | list the task kind |
+
+### FAQ
+
+**Why doesn't dly create directories or files?**
+
+Deliberate: a missing directory is a hard error, and edit mode leaves file
+creation to your editor — nothing appears behind your back.
+
+**What date is `+1m` relative to?**
+
+Always today; relative expressions have no anchor parameter. `dly 1105`
+means November 5 of the current year.
+
+**What exit codes does it use?**
+
+`0` on success; `1` for usage errors, invalid dates, missing
+directories/files, and empty listings; the editor's or viewer's exit code
+is passed through as-is.
+
+**Does it work on Windows?**
+
+Yes — pure standard library. Point `EDITOR_CMD` at any editor and
+`VIEWER_CMD` at e.g. `["more.com"]`; per-platform examples sit in the
+script's comments.
