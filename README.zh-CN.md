@@ -28,7 +28,7 @@ English: [README.md](README.md)
 各工具相互独立，按需从仓库直接安装到 `~/.local/bin`：
 
 ```bash
-install -m755 keydist ~/.local/bin/keydist
+install -m755 keydist.py ~/.local/bin/keydist
 install -m755 dly.py ~/.local/bin/dly
 ```
 

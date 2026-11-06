@@ -33,7 +33,7 @@ Tools are independent — install only the ones you need, straight from the
 repository into `~/.local/bin`:
 
 ```bash
-install -m755 keydist ~/.local/bin/keydist
+install -m755 keydist.py ~/.local/bin/keydist
 install -m755 dly.py ~/.local/bin/dly
 ```
 
