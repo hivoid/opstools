@@ -37,6 +37,7 @@ import pydoc
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -445,15 +446,49 @@ def _dir_label(target: Path) -> str:
     return "笔记目录"
 
 
+def _dir_writable(dir_path: Path) -> bool:
+    """判断目录是否可写：os.access 检查权限位后，再以真实写入探测兜底。
+
+    os.access 只反映权限位，无法覆盖只读挂载、不可变属性等仅在
+    实际写入时才暴露的不可写情况，因此在目录中创建并删除一个
+    临时文件来验证。
+    """
+    if not os.access(dir_path, os.W_OK):
+        return False
+    try:
+        fd, name = tempfile.mkstemp(dir=dir_path, prefix=".dly-probe-")
+    except OSError:
+        return False
+    os.close(fd)
+    try:
+        os.unlink(name)
+    except OSError:
+        pass  # 探测文件删除失败不影响可写判定
+    return True
+
+
+def _file_writable(path: Path) -> bool:
+    """判断已存在文件是否可写：os.access 检查后，再以“只打开不写入”探测兜底。"""
+    if not os.access(path, os.W_OK):
+        return False
+    try:
+        fd = os.open(path, os.O_WRONLY)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
 def _writable_error(path: Path) -> str | None:
     """编辑前检测写入权限，返回错误提示；均可写时返回 None。
 
     编辑需要在笔记/任务目录创建或更新文件，因此要求所在目录可写；
-    目标文件已存在时还要求文件本身可写。
+    目标文件已存在时还要求文件本身可写。权限位检查之外再以真实
+    写入探测兜底，覆盖只读挂载等 os.access 无法反映的不可写情况。
     """
-    if not os.access(path.parent, os.W_OK):
+    if not _dir_writable(path.parent):
         return f"{_dir_label(path)}不可写: {path.parent}"
-    if path.is_file() and not os.access(path, os.W_OK):
+    if path.is_file() and not _file_writable(path):
         return f"文件不可写: {path}"
     return None
 
