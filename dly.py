@@ -25,13 +25,14 @@
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
 
-当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用与 CLI 参数解析均已实现。
+当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测与 CLI 参数解析均已实现。
 """
 
 from __future__ import annotations
 
 import calendar
 import fnmatch
+import os
 import pydoc
 import re
 import subprocess
@@ -444,11 +445,25 @@ def _dir_label(target: Path) -> str:
     return "笔记目录"
 
 
+def _writable_error(path: Path) -> str | None:
+    """编辑前检测写入权限，返回错误提示；均可写时返回 None。
+
+    编辑需要在笔记/任务目录创建或更新文件，因此要求所在目录可写；
+    目标文件已存在时还要求文件本身可写。
+    """
+    if not os.access(path.parent, os.W_OK):
+        return f"{_dir_label(path)}不可写: {path.parent}"
+    if path.is_file() and not os.access(path, os.W_OK):
+        return f"文件不可写: {path}"
+    return None
+
+
 def _open_note(path: Path, view: bool) -> int:
     """编辑或查看目标笔记，返回退出码。
 
     所在目录不存在时抛出 NotesDirError（编辑与查看均要求目录存在）；
-    查看模式要求文件已存在，编辑模式是否创建文件交由编辑器决定。
+    查看模式要求文件已存在；编辑模式先经 _writable_error 检测写入权限，
+    不可写时输出提示并返回 1。是否创建文件交由编辑器决定。
     """
     if not path.parent.is_dir():
         raise NotesDirError(f"{_dir_label(path)}不存在: {path.parent}")
@@ -457,6 +472,10 @@ def _open_note(path: Path, view: bool) -> int:
             print(f"文件不存在: {path}", file=sys.stderr)
             return 1
         return view_file(path)
+    error = _writable_error(path)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 1
     return run_editor(path)
 
 

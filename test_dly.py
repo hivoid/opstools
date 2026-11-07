@@ -542,6 +542,69 @@ class CliOpenTests(NotesDirTestBase):
         self.assertIn("任务目录不存在", err)
 
 
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "root 用户不受文件权限限制")
+class WritePermissionTests(NotesDirTestBase):
+    """编辑模式的写入权限检测（NOTES_DIR / TASK_DIR 与目标文件）。"""
+
+    def _make_readonly(self, path: Path) -> None:
+        """将路径设为只读，测试结束后自动恢复权限以便清理临时目录。"""
+        path.chmod(0o500 if path.is_dir() else 0o400)
+        self.addCleanup(path.chmod, 0o700 if path.is_dir() else 0o600)
+
+    def test_writable_error_returns_none_when_writable(self):
+        self.assertIsNone(dly._writable_error(self.notes_dir / "20261105.md"))
+        self.assertIsNone(dly._writable_error(self.notes_dir / "not-exist.md"))
+
+    def test_writable_error_readonly_notes_dir(self):
+        self._make_readonly(self.notes_dir)
+        self.assertEqual(
+            dly._writable_error(self.notes_dir / "20261105.md"),
+            f"笔记目录不可写: {self.notes_dir}",
+        )
+
+    def test_writable_error_readonly_existing_file(self):
+        target = self.notes_dir / "20261105.md"
+        self._make_readonly(target)
+        self.assertEqual(dly._writable_error(target), f"文件不可写: {target}")
+
+    def test_edit_readonly_notes_dir(self):
+        self._make_readonly(self.notes_dir)
+        with mock.patch.object(dly, "run_editor") as editor:
+            code, _, err = self._run()
+        self.assertEqual(code, 1)
+        self.assertIn(f"笔记目录不可写: {self.notes_dir}", err)
+        editor.assert_not_called()
+
+    def test_edit_readonly_existing_file(self):
+        target = self.notes_dir / "20261105.md"
+        self._make_readonly(target)
+        with mock.patch.object(dly, "run_editor") as editor:
+            code, _, err = self._run("20261105")
+        self.assertEqual(code, 1)
+        self.assertIn(f"文件不可写: {target}", err)
+        editor.assert_not_called()
+
+    def test_edit_readonly_task_dir(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)
+        self.tasks_dir.mkdir()
+        self._make_readonly(self.tasks_dir)
+        with mock.patch.object(dly, "run_editor") as editor:
+            code, _, err = self._run("task")
+        self.assertEqual(code, 1)
+        self.assertIn(f"任务目录不可写: {self.tasks_dir}", err)
+        editor.assert_not_called()
+
+    def test_view_readonly_file_allowed(self):
+        # 查看模式只读，不应受写入权限影响
+        target = self.notes_dir / "20261105.md"
+        self._make_readonly(target)
+        with mock.patch.object(dly, "view_file", return_value=0) as viewer:
+            code, _, _ = self._run("-v", "20261105")
+        self.assertEqual(code, 0)
+        viewer.assert_called_once_with(target)
+
+
 class CliErrorTests(NotesDirTestBase):
     """PRD 9.3：CLI 用法错误用例。"""
 
