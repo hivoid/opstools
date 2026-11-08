@@ -168,7 +168,8 @@ class DateChainTests(FixedTodayMixin, unittest.TestCase):
         self.assertEqual(dly._resolve_date_args(["+3m", "-2d"]), date(2027, 2, 3))
 
     def test_single_offset_is_today_plus_offset(self):
-        self.assertEqual(dly._resolve_date_args(["+1m"]), date(2027, 2, 5))
+        # +1m：今天(2026-11-05) +1 个日历月 = 2026-12-05
+        self.assertEqual(dly._resolve_date_args(["+1m"]), date(2026, 12, 5))
 
     def test_offsets_apply_left_to_right_with_per_step_clamp(self):
         # 每步先落在截断后的真实日期上，因此顺序不同结果不同
