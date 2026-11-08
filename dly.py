@@ -2,8 +2,8 @@
 """dly - 每日笔记与任务笔记命令行工具。
 
 用法：
-    dly [打开选项] [日期表达式]
-    dly task|t [打开选项] [日期表达式]
+    dly [打开选项] [日期表达式] [偏移…]
+    dly task|t [打开选项] [日期表达式] [偏移…]
     dly global|g [打开选项]
     dly global|g task|t [打开选项]
     dly task|t global|g [打开选项]
@@ -21,17 +21,22 @@ cd 子命令：
 
 日期表达式：
     （空）         今天
-    +N / -N[d]     相对今天 ±N 天
-    +Nw / -Nw      相对今天 ±N 周
-    +Nm / -Nm      相对今天 ±N 个日历月（目标月不存在该日时截断到月末）
-    +Ny / -Ny      相对今天 ±N 个日历年（非闰年的 2 月 29 日截断为 2 月 28 日）
     DD             当前年、当前月的第 DD 日
     MMDD           当前年的指定月日
     YYMMDD         20YY 年的指定月日
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
 
-当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测、cd 子命令与 CLI 参数解析均已实现。
+偏移参数（可多个组合，从左到右逐个应用；基准缺省为今天）：
+    +N / -N[d]     ±N 天
+    +Nw / -Nw      ±N 周
+    +Nm / -Nm      ±N 个日历月（目标月不存在该日时截断到月末）
+    +Ny / -Ny      ±N 个日历年（非闰年的 2 月 29 日截断为 2 月 28 日）
+
+    例：dly 1101 +3m -2d   今年 11 月 1 日 3 个月后的前 2 天
+        dly +3m -2d        今天 3 个月后的前 2 天
+
+当前状态：日期与偏移组合解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测、cd 子命令与 CLI 参数解析均已实现。
 """
 
 from __future__ import annotations
@@ -68,7 +73,7 @@ VIEWER_CMD: list[str] | None = None
 
 # ============================== 日期解析 ==============================
 
-# 相对日期表达式：+1、-3d、+2w、+6m、-1y 等；单位可省略，缺省为天
+# 偏移表达式：+1、-3d、+2w、+6m、-1y 等；单位可省略，缺省为天
 _RELATIVE_RE = re.compile(r"^([+-])([0-9]+)([dwmy]?)$")
 
 
@@ -97,28 +102,15 @@ def _add_years(d: date, years: int) -> date:
 
 
 def parse_date_expr(expr: str, today: date) -> date:
-    """解析日期表达式并返回对应日期。
+    """解析基准日期表达式并返回对应日期。
 
-    按 PRD 第 7 节顺序匹配：空字符串、相对日期（±N[dwmy]?）、DD、MMDD、
-    YYMMDD（解释为 20YY）、YYYYMMDD、YYYY-MM-DD、YYYY/MM/DD、YYYY.MM.DD。
-    无法解析或日期非法时抛出 ValueError，消息为“无效日期: <表达式>”。
+    匹配：空字符串（今天）、DD、MMDD、YYMMDD（解释为 20YY）、YYYYMMDD、
+    YYYY-MM-DD、YYYY/MM/DD、YYYY.MM.DD。偏移（±N[dwmy]?）不是基准
+    表达式，由 _apply_offset 在基准日期上逐个应用。无法解析或日期非法
+    时抛出 ValueError，消息为“无效日期: <表达式>”。
     """
     if expr == "":
         return today
-
-    # 相对日期：±N[dwmy]?；N=0 时按零偏移返回今天
-    m = _RELATIVE_RE.match(expr)
-    if m is not None:
-        sign = -1 if m.group(1) == "-" else 1
-        n = sign * int(m.group(2))
-        unit = m.group(3)
-        if unit in ("", "d"):
-            return today + timedelta(days=n)
-        if unit == "w":
-            return today + timedelta(weeks=n)
-        if unit == "m":
-            return _add_months(today, n)
-        return _add_years(today, n)  # unit == "y"
 
     # 1-2 位数字：DD，使用当前年和当前月
     if re.fullmatch(r"\d{1,2}", expr):
@@ -144,6 +136,29 @@ def parse_date_expr(expr: str, today: date) -> date:
         return _make_date(int(m.group(1)), int(m.group(3)), int(m.group(4)), expr)
 
     raise ValueError(f"无效日期: {expr}")
+
+
+def _apply_offset(d: date, expr: str) -> date:
+    """在 d 上应用一个偏移表达式（±N[dwmy]?），返回新日期。
+
+    月、年加减沿用日历截断规则：目标月不存在该日时截断到月末，
+    非闰年的 2 月 29 日截断为 2 月 28 日；结果超出 date 表示范围时
+    由底层抛出 ValueError/OverflowError。expr 不匹配偏移文法时按
+    无效日期抛出 ValueError（_split_date_args 已先行校验，此为兜底）。
+    """
+    m = _RELATIVE_RE.match(expr)
+    if m is None:
+        raise ValueError(f"无效日期: {expr}")
+    sign = -1 if m.group(1) == "-" else 1
+    n = sign * int(m.group(2))
+    unit = m.group(3)
+    if unit in ("", "d"):
+        return d + timedelta(days=n)
+    if unit == "w":
+        return d + timedelta(weeks=n)
+    if unit == "m":
+        return _add_months(d, n)
+    return _add_years(d, n)  # unit == "y"
 
 
 # ============================== 目录与路径生成 ==============================
@@ -349,8 +364,8 @@ _DEFAULT_PATTERN: str = "*"
 # 用法说明，用法错误时随错误信息一起输出到 stderr
 _USAGE = """\
 用法：
-    dly [打开选项] [日期表达式]
-    dly task|t [打开选项] [日期表达式]
+    dly [打开选项] [日期表达式] [偏移…]
+    dly task|t [打开选项] [日期表达式] [偏移…]
     dly global|g [打开选项]
     dly global|g task|t [打开选项]
     dly task|t global|g [打开选项]
@@ -368,15 +383,17 @@ cd 子命令：
 
 日期表达式：
     （空）         今天
-    +N / -N[d]     相对今天 ±N 天
-    +Nw / -Nw      相对今天 ±N 周
-    +Nm / -Nm      相对今天 ±N 个日历月
-    +Ny / -Ny      相对今天 ±N 个日历年
     DD             当前年、当前月的第 DD 日
     MMDD           当前年的指定月日
     YYMMDD         20YY 年的指定月日
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
+
+偏移参数（可多个组合，从左到右逐个应用；基准缺省为今天）：
+    +N / -N[d]     ±N 天
+    +Nw / -Nw      ±N 周
+    +Nm / -Nm      ±N 个日历月
+    +Ny / -Ny      ±N 个日历年
 """
 
 
@@ -427,26 +444,56 @@ def _parse_keywords(rest: list[str]) -> tuple[bool, bool, list[str]]:
 
 
 def _looks_like_date_expr(expr: str) -> bool:
-    """判断表达式是否匹配 PRD 7.1 的某种日期格式（不校验日期值合法性）。
+    """判断表达式是否匹配某种基准日期格式（不校验日期值合法性）。
 
     用于区分“格式不符”（按用法错误处理）与“格式相符但日期非法”
-    （按无效日期处理，如 20261301）。
+    （按无效日期处理，如 20261301）；偏移文法由 _RELATIVE_RE 单独判断。
     """
-    if _RELATIVE_RE.match(expr) is not None:
-        return True
     if re.fullmatch(r"\d{1,2}|\d{3,4}|\d{6}|\d{8}", expr) is not None:
         return True
     return re.fullmatch(r"\d{4}[-/.]\d{2}[-/.]\d{2}", expr) is not None
 
 
-def _resolve_date(expr: str) -> date:
-    """解析日期表达式；格式不符按用法错误，格式相符但日期非法按无效日期处理。"""
+def _split_date_args(tail: list[str]) -> tuple[str, list[str]]:
+    """把位置参数拆分为 (基准日期表达式, 偏移参数列表) 并校验文法。
+
+    首个参数是偏移（±N[dwmy]?）时基准缺省（空串 = 今天）且全部参数
+    都必须是偏移；否则首个参数为基准日期表达式，其后只能是偏移。
+    基准格式不符、或偏移位置出现其他参数时按用法错误抛出 UsageError。
+    """
+    if not tail:
+        return "", []
+    if _RELATIVE_RE.match(tail[0]) is not None:
+        base_expr, offsets = "", tail
+    else:
+        if not _looks_like_date_expr(tail[0]):
+            raise UsageError(f"未知参数: {tail[0]}")
+        base_expr, offsets = tail[0], tail[1:]
+    for expr in offsets:
+        if _RELATIVE_RE.match(expr) is None:
+            raise UsageError(f"未知参数: {expr}")
+    return base_expr, offsets
+
+
+def _resolve_date_args(tail: list[str]) -> date:
+    """解析“[基准日期表达式] 偏移…”组合，返回最终日期。
+
+    基准缺省为今天；偏移从左到右逐个在前一步结果上应用，每步独立
+    按日历截断（如 0131 +1m 得 0228，再 -1d 得 0227）。基准格式相符
+    但日期非法、或偏移把日期推出 date 表示范围时按无效日期抛出
+    DateError，消息带上出错的那个表达式。
+    """
+    base_expr, offsets = _split_date_args(tail)
     try:
-        return parse_date_expr(expr, date.today())
+        d = parse_date_expr(base_expr, date.today())
     except (ValueError, OverflowError):
-        if _looks_like_date_expr(expr):
+        raise DateError(f"无效日期: {base_expr}") from None
+    for expr in offsets:
+        try:
+            d = _apply_offset(d, expr)
+        except (ValueError, OverflowError):
             raise DateError(f"无效日期: {expr}") from None
-        raise UsageError(f"未知参数: {expr}") from None
+    return d
 
 
 def _dir_label(target: Path) -> str:
@@ -653,25 +700,17 @@ def _run(args: list[str]) -> int:
     is_task, is_global, tail = _parse_keywords(rest)
 
     if is_global:
-        # global|g [task|t]：全局普通/任务笔记；global 之后不接受日期表达式
+        # global|g [task|t]：全局普通/任务笔记；global 之后不接受日期表达式与偏移
         if tail:
             raise UsageError(f"未知参数: {tail[0]}")
         return _open_note(global_task_path() if is_task else global_note_path(), view)
 
     if is_task:
-        # task|t [日期表达式]：任务今天或任务指定日期
-        if not tail:
-            return _open_note(task_note_path(date.today()), view)
-        if len(tail) == 1:
-            return _open_note(task_note_path(_resolve_date(tail[0])), view)
-        raise UsageError(f"未知参数: {tail[1]}")
+        # task|t [日期表达式] [偏移…]：任务今天、任务指定日期或再组合偏移
+        return _open_note(task_note_path(_resolve_date_args(tail)), view)
 
-    # 无关键字：应为日期表达式（普通指定日期），只允许一个参数
-    if len(rest) > 1:
-        if _looks_like_date_expr(rest[0]):
-            raise UsageError(f"未知参数: {rest[1]}")
-        raise UsageError(f"未知参数: {rest[0]}")
-    return _open_note(normal_note_path(_resolve_date(rest[0])), view)
+    # 无关键字：[日期表达式] [偏移…]
+    return _open_note(normal_note_path(_resolve_date_args(rest)), view)
 
 
 def main(argv: list[str]) -> int:

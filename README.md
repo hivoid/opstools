@@ -13,7 +13,7 @@ over time.
 | Tool | Language | Description |
 | --- | --- | --- |
 | [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change |
-| [dly](#dly) | Python 3.8+ | Open, view, and list daily notes and task notes; short date expressions, configurable editor and viewer |
+| [dly](#dly) | Python 3.8+ | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
 
 ## Principles
 
@@ -273,7 +273,8 @@ dly -l 2026                                 # list matching file names
 
 - **One command for today's diary** — `dly` opens today's `YYYYMMDD.md`
   directly; short expressions like `dly 1105`, `dly +1m`, or
-  `dly 2026-11-05` spare you date arithmetic and path typing.
+  `dly 2026-11-05` spare you date arithmetic and path typing, and offsets
+  compose on top of a base date: `dly 1101 +3m -2d`.
 - **Diary and tasks, kept apart** — `dly task` works on `YYYYMMDD.task.md`,
   optionally in its own directory, never mixing with regular notes.
 - **Global notes** — `dly global` and `dly g t` open the date-less
@@ -314,13 +315,35 @@ in view mode a missing file exits with an error.
 | Expression | Meaning | Example (today: 2026-11-05) |
 | --- | --- | --- |
 | (empty) | today | → `20261105.md` |
-| `±N[d]` / `±Nw` / `±Nm` / `±Ny` | ±N days/weeks/months/years from today | `+1m` → 2026-12-05 |
 | `DD` / `MMDD` / `YYMMDD` | day this month / month-day this year / 20YY month-day | `110312` → 2011-03-12 |
 | `YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` | full date, any year | `19991231` |
 
+### Date offsets
+
+Offsets are auxiliary expressions computed on top of a base date: the first
+positional argument may be a base date expression, and every argument after
+it must be an offset. With no base date, today is the base — a lone offset
+therefore still works (`dly +1m`). Offsets apply left to right, each onto
+the previous result, and may be mixed and repeated:
+
+| Offset | Meaning |
+| --- | --- |
+| `+N` / `-N[d]` | ±N days |
+| `+Nw` / `-Nw` | ±N weeks |
+| `+Nm` / `-Nm` | ±N calendar months |
+| `+Ny` / `-Ny` | ±N calendar years |
+
+`dly 1101 +3m -2d` is Nov 1 plus 3 months minus 2 days (2027-01-30);
+`dly +3m -2d` is the same computed from today.
+
 Month and year arithmetic follow the calendar: a day missing in the target
 month is clamped to the month's end (`+1m` from 2026-01-31 gives
-2026-02-28); Feb 29 shifted onto a non-leap year becomes Feb 28.
+2026-02-28); Feb 29 shifted onto a non-leap year becomes Feb 28. Clamping
+is per step — each offset first lands on a real, clamped date, so
+`2026-01-31 +1m -1d` gives 2026-02-27.
+
+Date expressions and offsets are only parsed in open/view mode; in list
+mode (`-l`) such tokens are plain filename patterns.
 
 ### Usage
 
@@ -329,6 +352,8 @@ dly                            # edit today's regular note
 dly -v 2026-11-05              # view the note for a given date
 dly task                       # edit today's task note
 dly t -v +1w                   # view next week's task note
+dly 1101 +3m -2d               # edit Nov 1 +3 months -2 days (left to right)
+dly +3m -2d                    # offsets computed from today
 dly global task                # edit global.task.md (dly task global works too)
 dly -l                         # list regular note file names (reverse order)
 dly -l -a 2026                 # all kinds, file names containing 2026
@@ -342,7 +367,8 @@ dly cd t -v                    # print TASK_DIR instead of spawning a shell
   error.
 - `-l` / `--list` prints one file name per line in reverse lexicographic
   order; a pattern without `* ? [` is matched as `*pattern*`, otherwise as
-  a glob; no match exits `1`.
+  a glob; no match exits `1`. Date tokens like `+1m` are not parsed here —
+  they are plain filename patterns.
 - `cd [task|t]` spawns an interactive sub shell (`$SHELL`, on Windows
   `%COMSPEC%`) inside the directory; `exit` returns to the original
   directory and the sub shell's exit code is passed through. With `-v`
@@ -356,6 +382,7 @@ dly cd t -v                    # print TASK_DIR instead of spawning a shell
 | --- | --- |
 | `dly` | edit today's regular note (`YYYYMMDD.md`) |
 | `dly 1105` / `dly +1m` | edit that date's regular note |
+| `dly 1101 +3m -2d` | edit a base date with composed offsets (left to right) |
 | `dly task` / `dly t` | edit today's task note |
 | `dly g t` | edit `global.task.md` (`task global` works too) |
 | `dly -v …` | any of the above, view-only |
@@ -374,8 +401,8 @@ creation to your editor — nothing appears behind your back.
 
 **What date is `+1m` relative to?**
 
-Always today; relative expressions have no anchor parameter. `dly 1105`
-means November 5 of the current year.
+Today when given alone; with a base date expression it is relative to that
+base (`dly 1105 +1m`). `dly 1105` means November 5 of the current year.
 
 **What exit codes does it use?**
 

@@ -40,36 +40,12 @@ class ParseDateExprTests(unittest.TestCase):
     def test_empty_is_today(self):
         self.assertEqual(dly.parse_date_expr("", TODAY), TODAY)
 
-    def test_relative_days(self):
-        self.assertEqual(dly.parse_date_expr("+1", TODAY), date(2026, 11, 6))
-        self.assertEqual(dly.parse_date_expr("-1", TODAY), date(2026, 11, 4))
-        self.assertEqual(dly.parse_date_expr("+3d", TODAY), date(2026, 11, 8))
-        self.assertEqual(dly.parse_date_expr("-3d", TODAY), date(2026, 11, 2))
-        self.assertEqual(dly.parse_date_expr("+0", TODAY), TODAY)
-        self.assertEqual(dly.parse_date_expr("-0", TODAY), TODAY)
-
-    def test_relative_weeks(self):
-        self.assertEqual(dly.parse_date_expr("+2w", TODAY), date(2026, 11, 19))
-        self.assertEqual(dly.parse_date_expr("-1w", TODAY), date(2026, 10, 29))
-
-    def test_relative_months(self):
-        self.assertEqual(dly.parse_date_expr("+1m", TODAY), date(2026, 12, 5))
-        self.assertEqual(dly.parse_date_expr("-1m", TODAY), date(2026, 10, 5))
-        self.assertEqual(dly.parse_date_expr("+2m", TODAY), date(2027, 1, 5))
-        self.assertEqual(dly.parse_date_expr("-11m", TODAY), date(2025, 12, 5))
-
-    def test_relative_months_truncate_to_month_end(self):
-        # 目标月不存在该日时截断到目标月最后一天
-        self.assertEqual(dly.parse_date_expr("+1m", date(2026, 1, 31)), date(2026, 2, 28))
-        self.assertEqual(dly.parse_date_expr("+1m", date(2026, 3, 31)), date(2026, 4, 30))
-        self.assertEqual(dly.parse_date_expr("-1m", date(2026, 3, 31)), date(2026, 2, 28))
-
-    def test_relative_years_leap_day(self):
-        # 非闰年的 2 月 29 日截断为 2 月 28 日，闰年保持 2 月 29 日
-        self.assertEqual(dly.parse_date_expr("+1y", date(2024, 2, 29)), date(2025, 2, 28))
-        self.assertEqual(dly.parse_date_expr("-1y", date(2024, 2, 29)), date(2023, 2, 28))
-        self.assertEqual(dly.parse_date_expr("+4y", date(2024, 2, 29)), date(2028, 2, 29))
-        self.assertEqual(dly.parse_date_expr("+1y", TODAY), date(2027, 11, 5))
+    def test_offsets_are_not_base_expressions(self):
+        # 偏移不再是独立日期表达式；基准缺省今天与偏移组合由 CLI 层解析
+        for expr in ("+1", "-3d", "+2w", "+6m", "-1y", "+0", "-0"):
+            with self.subTest(expr=expr):
+                with self.assertRaisesRegex(ValueError, "无效日期"):
+                    dly.parse_date_expr(expr, TODAY)
 
     def test_dd_uses_current_month(self):
         self.assertEqual(dly.parse_date_expr("5", TODAY), TODAY)
@@ -116,6 +92,111 @@ class ParseDateExprTests(unittest.TestCase):
     def test_error_message_contains_expr(self):
         with self.assertRaisesRegex(ValueError, "^无效日期: 20261301$"):
             dly.parse_date_expr("20261301", TODAY)
+
+
+class _FixedDate(date):
+    """today() 固定返回 TODAY 的 date 子类，供 patch dly.date 使用。"""
+
+    @classmethod
+    def today(cls) -> date:
+        return TODAY
+
+
+class FixedTodayMixin:
+    """把 dly 模块内的 date 替换为 _FixedDate，使“今天”可确定断言。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(dly, "date", _FixedDate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class OffsetApplyTests(unittest.TestCase):
+    """偏移表达式 _apply_offset：单位、日历截断与逐步语义。"""
+
+    def test_days_weeks_and_zero(self):
+        d = date(2026, 11, 5)
+        self.assertEqual(dly._apply_offset(d, "+3"), date(2026, 11, 8))
+        self.assertEqual(dly._apply_offset(d, "-3d"), date(2026, 11, 2))
+        self.assertEqual(dly._apply_offset(d, "+2w"), date(2026, 11, 19))
+        self.assertEqual(dly._apply_offset(d, "-1w"), date(2026, 10, 29))
+        self.assertEqual(dly._apply_offset(d, "+0"), d)
+        self.assertEqual(dly._apply_offset(d, "-0"), d)
+
+    def test_months(self):
+        self.assertEqual(dly._apply_offset(date(2026, 11, 5), "+1m"), date(2026, 12, 5))
+        self.assertEqual(dly._apply_offset(date(2026, 11, 5), "-1m"), date(2026, 10, 5))
+        self.assertEqual(dly._apply_offset(date(2026, 11, 5), "+2m"), date(2027, 1, 5))
+        self.assertEqual(dly._apply_offset(date(2026, 11, 5), "-11m"), date(2025, 12, 5))
+
+    def test_months_clamp_to_month_end(self):
+        # 目标月不存在该日时截断到目标月最后一天
+        self.assertEqual(dly._apply_offset(date(2026, 1, 31), "+1m"), date(2026, 2, 28))
+        self.assertEqual(dly._apply_offset(date(2026, 3, 31), "+1m"), date(2026, 4, 30))
+        self.assertEqual(dly._apply_offset(date(2026, 3, 31), "-1m"), date(2026, 2, 28))
+
+    def test_years_leap_day(self):
+        # 非闰年的 2 月 29 日截断为 2 月 28 日，闰年保持 2 月 29 日
+        self.assertEqual(dly._apply_offset(date(2024, 2, 29), "+1y"), date(2025, 2, 28))
+        self.assertEqual(dly._apply_offset(date(2024, 2, 29), "-1y"), date(2023, 2, 28))
+        self.assertEqual(dly._apply_offset(date(2024, 2, 29), "+4y"), date(2028, 2, 29))
+
+    def test_invalid_offset_raises(self):
+        for expr in ("1", "1d", "+", "+1x", "-1D"):
+            with self.subTest(expr=expr):
+                with self.assertRaisesRegex(ValueError, "无效日期"):
+                    dly._apply_offset(date(2026, 11, 5), expr)
+
+
+class DateChainTests(FixedTodayMixin, unittest.TestCase):
+    """“[基准日期表达式] 偏移…”组合解析：拆分、从左到右应用与错误分类。"""
+
+    def test_empty_is_today(self):
+        self.assertEqual(dly._resolve_date_args([]), TODAY)
+
+    def test_base_only(self):
+        self.assertEqual(dly._resolve_date_args(["1101"]), date(2026, 11, 1))
+
+    def test_base_with_offsets(self):
+        # 1101 +3m -2d：(2026-11-01 +3m → 2027-02-01) -2d = 2027-01-30
+        self.assertEqual(dly._resolve_date_args(["1101", "+3m", "-2d"]),
+                         date(2027, 1, 30))
+
+    def test_offsets_only_base_defaults_to_today(self):
+        # +3m -2d：今天(2026-11-05) 3 个月后的前 2 天
+        self.assertEqual(dly._resolve_date_args(["+3m", "-2d"]), date(2027, 2, 3))
+
+    def test_single_offset_is_today_plus_offset(self):
+        self.assertEqual(dly._resolve_date_args(["+1m"]), date(2027, 2, 5))
+
+    def test_offsets_apply_left_to_right_with_per_step_clamp(self):
+        # 每步先落在截断后的真实日期上，因此顺序不同结果不同
+        self.assertEqual(dly._resolve_date_args(["0131", "+1m", "-1d"]), date(2026, 2, 27))
+        self.assertEqual(dly._resolve_date_args(["0131", "-1d", "+1m"]), date(2026, 2, 28))
+
+    def test_offsets_may_repeat_and_mix(self):
+        self.assertEqual(dly._resolve_date_args(["1105", "+1m", "+1m"]), date(2027, 1, 5))
+        self.assertEqual(dly._resolve_date_args(["+0", "-0", "+1d"]), date(2026, 11, 6))
+
+    def test_second_non_offset_rejected(self):
+        for tail in (["1101", "1105"], ["1101", "3d"], ["1101", "+1d", "extra"],
+                     ["foo"], ["foo", "+1d"], ["+1m", "foo"]):
+            with self.subTest(tail=tail):
+                with self.assertRaisesRegex(dly.UsageError, "未知参数"):
+                    dly._resolve_date_args(tail)
+
+    def test_invalid_base_reports_base_expr(self):
+        with self.assertRaisesRegex(dly.DateError, "^无效日期: 20261301$"):
+            dly._resolve_date_args(["20261301", "+1d"])
+
+    def test_offset_overflow_reports_offset_expr(self):
+        with self.assertRaisesRegex(dly.DateError, "^无效日期: \\+1d$"):
+            dly._resolve_date_args(["9999-12-31", "+1d"])
+
+    def test_offset_underflow_reports_offset_expr(self):
+        with self.assertRaisesRegex(dly.DateError, "^无效日期: -1d$"):
+            dly._resolve_date_args(["0001-01-01", "-1d"])
 
 
 class NotesDirTestBase(unittest.TestCase):
@@ -416,8 +497,9 @@ class CliOpenTests(NotesDirTestBase):
         editor.assert_called_once_with(expected)
 
     def test_edit_expr_routes_to_normal_note(self):
+        # 仅基准表达式；偏移组合见 CliDateChainTests
         for expr in ("5", "1105", "110312", "19991231", "21000101", "2026-11-05",
-                     "2026/11/05", "2026.11.05", "+2w", "-1"):
+                     "2026/11/05", "2026.11.05"):
             with self.subTest(expr=expr):
                 expected = dly.normal_note_path(dly.parse_date_expr(expr, date.today()))
                 with mock.patch.object(dly, "run_editor", return_value=0) as editor:
@@ -644,6 +726,69 @@ class CdTests(NotesDirTestBase):
                 code, _, err = self._run(*args)
                 self.assertEqual(code, 1)
                 self.assertIn("用法", err)
+
+
+class CliDateChainTests(FixedTodayMixin, NotesDirTestBase):
+    """组合偏移的 CLI 路由：打开/查看/任务形式、global 拒绝与列表边界。"""
+
+    def test_edit_base_with_offsets(self):
+        # 1101 +3m -2d：(2026-11-01 +3m → 2027-02-01) -2d = 2027-01-30
+        expected = self.notes_dir / "20270130.md"
+        with mock.patch.object(dly, "run_editor", return_value=0) as editor:
+            code, _, _ = self._run("1101", "+3m", "-2d")
+        self.assertEqual(code, 0)
+        editor.assert_called_once_with(expected)
+
+    def test_edit_offsets_only(self):
+        # +3m -2d：今天(2026-11-05) 3 个月后的前 2 天
+        expected = self.notes_dir / "20270203.md"
+        with mock.patch.object(dly, "run_editor", return_value=0) as editor:
+            code, _, _ = self._run("+3m", "-2d")
+        self.assertEqual(code, 0)
+        editor.assert_called_once_with(expected)
+
+    def test_task_base_with_offsets(self):
+        # t 1101 +1m：2026-11-01 +1m = 2026-12-01
+        expected = self.notes_dir / "20261201.task.md"
+        with mock.patch.object(dly, "run_editor", return_value=0) as editor:
+            code, _, _ = self._run("t", "1101", "+1m")
+        self.assertEqual(code, 0)
+        editor.assert_called_once_with(expected)
+
+    def test_view_base_with_offsets(self):
+        target = self.notes_dir / "20270130.md"
+        target.write_text("", encoding="utf-8")
+        with mock.patch.object(dly, "view_file", return_value=0) as viewer:
+            code, _, _ = self._run("-v", "1101", "+3m", "-2d")
+        self.assertEqual(code, 0)
+        viewer.assert_called_once_with(target)
+
+    def test_global_rejects_offsets(self):
+        code, _, err = self._run("global", "+3m")
+        self.assertEqual(code, 1)
+        self.assertIn("未知参数: +3m", err)
+
+    def test_list_mode_treats_offset_as_pattern(self):
+        # 列表模式不解析偏移：+1m 仅是文件名 pattern
+        code, _, err = self._run("-l", "+1m")
+        self.assertEqual(code, 1)
+        self.assertIn("没有匹配的文件: +1m", err)
+
+    def test_task_list_treats_offset_as_pattern(self):
+        code, _, err = self._run("task", "-l", "+1m")
+        self.assertEqual(code, 1)
+        self.assertIn("没有匹配的文件: +1m", err)
+
+    def test_edit_invalid_base_with_offset(self):
+        code, _, err = self._run("20261301", "+1d")
+        self.assertEqual(code, 1)
+        self.assertIn("无效日期: 20261301", err)
+        self.assertNotIn("用法", err)
+
+    def test_edit_offset_overflow(self):
+        code, _, err = self._run("9999-12-31", "+1d")
+        self.assertEqual(code, 1)
+        self.assertIn("无效日期: +1d", err)
 
 
 @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
