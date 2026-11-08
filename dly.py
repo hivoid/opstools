@@ -9,15 +9,15 @@
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
-    dly cd [task|t]
-    dly task|t cd
+    dly cd [task|t] [-v]
+    dly task|t cd [-v]
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
 
 cd 子命令：
-    输出笔记/任务目录路径；子进程无法切换 shell 工作目录，
-    可配合 cd $(dly cd) 或 shell 包装函数进入目标目录
+    在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
+    加 -v 不进入，仅输出目录路径，供 cd $(dly cd -v) 使用
 
 日期表达式：
     （空）         今天
@@ -356,15 +356,15 @@ _USAGE = """\
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
-    dly cd [task|t]
-    dly task|t cd
+    dly cd [task|t] [-v]
+    dly task|t cd [-v]
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
 
 cd 子命令：
-    输出笔记/任务目录路径；子进程无法切换 shell 工作目录，
-    可配合 cd $(dly cd) 或 shell 包装函数进入目标目录
+    在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
+    加 -v 不进入，仅输出目录路径，供 cd $(dly cd -v) 使用
 
 日期表达式：
     （空）         今天
@@ -571,19 +571,56 @@ def _run_list(rest: list[str], base: str) -> int:
     return 0
 
 
-def _run_cd(is_task: bool) -> int:
-    """执行 cd 子命令：输出目标目录路径，返回退出码。
+def _parse_cd_args(rest: list[str]) -> tuple[bool, bool]:
+    """解析 cd 子命令的剩余参数，返回 (是否任务目录, 是否仅输出路径)。
 
-    子进程无法切换父 shell 的工作目录，因此输出目录路径供
-    cd $(dly cd) 或 shell 包装函数使用。is_task 为 True 时输出任务
-    目录（TASK_DIR 为 None 时与笔记目录相同），否则输出笔记目录；
-    目录不存在时沿用 NotesDirError 提示。
+    允许至多一个 task|t 与至多一个 -v/--view，顺序不限；出现其他
+    参数或重复参数时按用法错误处理。
+    """
+    is_task = False
+    view = False
+    for arg in rest:
+        if arg in _VIEW_FLAGS:
+            if view:
+                raise UsageError("重复使用 -v/--view")
+            view = True
+        elif arg in _TASK_WORDS and not is_task:
+            is_task = True
+        else:
+            raise UsageError(f"未知参数: {arg}")
+    return is_task, view
+
+
+def _cd_shell_cmd() -> list[str]:
+    """返回用于进入目录的交互式 shell 命令。"""
+    if os.name == "nt":
+        return [os.environ.get("COMSPEC", "cmd.exe")]
+    return [os.environ.get("SHELL", "/bin/sh")]
+
+
+def _run_cd(is_task: bool, view: bool) -> int:
+    """执行 cd 子命令，返回退出码。
+
+    默认在目标目录启动交互式子 shell（chezmoi cd 风格）：父 shell 的
+    工作目录不受影响，exit 退出子 shell 后回到原目录，退出码取自
+    子 shell。view 为 True 时不进入，仅输出目录路径，供
+    cd $(dly cd -v) 或 shell 包装函数使用。is_task 为 True 时目标为
+    任务目录（TASK_DIR 为 None 时与笔记目录相同）；目录不存在时
+    沿用 NotesDirError 提示。
     """
     target = _task_dir() if is_task else _normal_dir()
     label = "任务目录" if is_task and TASK_DIR is not None else "笔记目录"
     _ensure_dir(target, label)
-    print(target)
-    return 0
+    if view:
+        print(target)
+        return 0
+    cmd = _cd_shell_cmd()
+    try:
+        result = subprocess.run(cmd, cwd=target)
+    except OSError as exc:
+        print(f"子 shell 启动失败: {cmd}: {exc}", file=sys.stderr)
+        return 1
+    return result.returncode
 
 
 def _run(args: list[str]) -> int:
@@ -597,18 +634,13 @@ def _run(args: list[str]) -> int:
         # dly global -l / dly g -l：等同普通列表形式
         return _run_list(args[2:], "normal")
 
-    # ---- cd 子命令识别（优先于 -v 剥离；cd 不接受选项）----
+    # ---- cd 子命令识别（优先于 -v 剥离；cd 自行解析 task|t 与 -v）----
     if args and args[0] == _CD_WORD:
-        # dly cd [task|t]：cd 之后只允许至多一个 task|t
-        cd_rest = args[1:]
-        if len(cd_rest) > 1:
-            raise UsageError(f"未知参数: {cd_rest[1]}")
-        if cd_rest and cd_rest[0] not in _TASK_WORDS:
-            raise UsageError(f"未知参数: {cd_rest[0]}")
-        return _run_cd(bool(cd_rest))
-    if len(args) == 2 and args[0] in _TASK_WORDS and args[1] == _CD_WORD:
-        # dly task cd / dly t cd：输出任务目录路径
-        return _run_cd(True)
+        # dly cd [task|t] [-v]
+        return _run_cd(*_parse_cd_args(args[1:]))
+    if len(args) >= 2 and args[0] in _TASK_WORDS and args[1] == _CD_WORD:
+        # dly task cd [-v] / dly t cd [-v]
+        return _run_cd(True, *_parse_cd_args(args[2:]))
 
     # ---- 打开 / 查看模式：剥离最多一个 -v/--view 后按形式解析 ----
     rest, view = _strip_view_flag(args)

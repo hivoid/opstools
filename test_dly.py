@@ -543,55 +543,107 @@ class CliOpenTests(NotesDirTestBase):
 
 
 class CdTests(NotesDirTestBase):
-    """cd 子命令：输出目标目录路径，供 cd $(dly cd) 或 shell 包装函数使用。"""
+    """cd 子命令：默认在目标目录启动子 shell；-v 仅输出目录路径。"""
 
-    def test_cd_prints_notes_dir(self):
-        code, out, err = self._run("cd")
-        self.assertEqual(code, 0)
-        self.assertEqual(out, f"{self.notes_dir}\n")
-        self.assertEqual(err, "")
-
-    def test_cd_task_forms_print_task_dir(self):
+    def test_cd_launches_shell_in_target_dir(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)
         self.tasks_dir.mkdir()
-        for args in (("cd", "t"), ("cd", "task"), ("task", "cd"), ("t", "cd")):
+        cases = (
+            (("cd",), self.notes_dir),
+            (("cd", "t"), self.tasks_dir),
+            (("task", "cd"), self.tasks_dir),
+        )
+        for args, target in cases:
+            with self.subTest(args=args):
+                with mock.patch.dict(os.environ, {"SHELL": "/bin/dly-fake-shell"}):
+                    with mock.patch.object(dly.subprocess, "run",
+                                           return_value=mock.Mock(returncode=0)) as run:
+                        code, out, err = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, "")
+                self.assertEqual(err, "")
+                run.assert_called_once_with(["/bin/dly-fake-shell"], cwd=target)
+
+    def test_cd_shell_defaults_to_sh_without_shell_env(self):
+        env = {k: v for k, v in os.environ.items() if k != "SHELL"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(dly.subprocess, "run",
+                                   return_value=mock.Mock(returncode=0)) as run:
+                code, _, _ = self._run("cd")
+        self.assertEqual(code, 0)
+        run.assert_called_once_with(["/bin/sh"], cwd=self.notes_dir)
+
+    def test_cd_shell_uses_comspec_on_windows(self):
+        with mock.patch.object(dly.os, "name", "nt"):
+            with mock.patch.dict(os.environ, {"COMSPEC": "cmd.exe"}):
+                with mock.patch.object(dly.subprocess, "run",
+                                       return_value=mock.Mock(returncode=0)) as run:
+                    code, _, _ = self._run("cd")
+        self.assertEqual(code, 0)
+        run.assert_called_once_with(["cmd.exe"], cwd=self.notes_dir)
+
+    def test_cd_shell_exit_code_passthrough(self):
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/dly-fake-shell"}):
+            with mock.patch.object(dly.subprocess, "run",
+                                   return_value=mock.Mock(returncode=5)):
+                code, _, _ = self._run("cd")
+        self.assertEqual(code, 5)
+
+    def test_cd_shell_start_failure(self):
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/dly-fake-shell"}):
+            with mock.patch.object(dly.subprocess, "run",
+                                   side_effect=OSError(2, "No such file")):
+                code, _, err = self._run("cd")
+        self.assertEqual(code, 1)
+        self.assertIn("子 shell 启动失败", err)
+
+    def test_cd_v_prints_notes_dir(self):
+        for args in (("cd", "-v"), ("cd", "--view")):
+            with self.subTest(args=args):
+                code, out, err = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{self.notes_dir}\n")
+                self.assertEqual(err, "")
+
+    def test_cd_v_task_forms_print_task_dir(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)
+        self.tasks_dir.mkdir()
+        for args in (("cd", "t", "-v"), ("cd", "-v", "task"),
+                     ("task", "cd", "-v"), ("t", "cd", "--view")):
             with self.subTest(args=args):
                 code, out, _ = self._run(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(out, f"{self.tasks_dir}\n")
 
-    def test_cd_task_shared_dir_falls_back_to_notes_dir(self):
+    def test_cd_v_shared_dir_falls_back_to_notes_dir(self):
         # TASK_DIR 为 None 时任务目录与笔记目录共用
-        for args in (("cd", "t"), ("task", "cd")):
+        for args in (("cd", "t", "-v"), ("task", "cd", "-v")):
             with self.subTest(args=args):
                 code, out, _ = self._run(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(out, f"{self.notes_dir}\n")
 
-    def test_cd_missing_notes_dir(self):
+    def test_cd_v_missing_notes_dir(self):
         missing = self.base / "missing-daily"
         self._patch_dir("NOTES_DIR", missing)
-        code, _, err = self._run("cd")
+        code, _, err = self._run("cd", "-v")
         self.assertEqual(code, 1)
         self.assertIn(f"笔记目录不存在: {missing}", err)
 
-    def test_cd_task_missing_task_dir(self):
+    def test_cd_v_missing_task_dir(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)  # tasks_dir 未创建
-        code, _, err = self._run("cd", "task")
+        code, _, err = self._run("cd", "task", "-v")
         self.assertEqual(code, 1)
         self.assertIn(f"任务目录不存在: {self.tasks_dir}", err)
 
     def test_cd_rejects_unknown_args(self):
-        code, _, err = self._run("cd", "global")
-        self.assertEqual(code, 1)
-        self.assertIn("未知参数: global", err)
-        self.assertIn("用法", err)
-        code, _, err = self._run("cd", "t", "extra")
-        self.assertEqual(code, 1)
-        self.assertIn("未知参数: extra", err)
-        code, _, err = self._run("task", "cd", "extra")
-        self.assertEqual(code, 1)
-        self.assertIn("未知参数", err)
+        for args in (("cd", "global"), ("cd", "t", "extra"),
+                     ("task", "cd", "extra"), ("cd", "-v", "-v"),
+                     ("cd", "-v", "t", "t")):
+            with self.subTest(args=args):
+                code, _, err = self._run(*args)
+                self.assertEqual(code, 1)
+                self.assertIn("用法", err)
 
 
 @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,

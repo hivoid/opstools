@@ -257,8 +257,8 @@ dly -l 2026                                 # 列出匹配的文件名
   `global.task.md`。
 - **只读回顾与盘点** — `dly -v` 只查看不编辑；`dly -l -a 2026` 按子串或
   glob 筛选文件名，快速盘点已有笔记。
-- **快速跳转目录** — `dly cd [task|t]` 输出普通/任务目录路径，配合
-  `cd $(dly cd)` 或 shell 包装函数一步进入。
+- **快速进入笔记目录** — `dly cd [task|t]` 在普通/任务目录中启动交互式
+  子 shell（chezmoi cd 风格）；`dly cd -v` 仅输出路径。
 
 ### 配置
 
@@ -306,16 +306,17 @@ dly global task                # 编辑 global.task.md（dly task global 亦可�
 dly -l                         # 列出普通笔记文件名（字典序逆序）
 dly -l -a 2026                 # 全部类型中筛选文件名含 2026 的文件
 dly task -l '*01.task.md'      # 任务类型，按 glob 模式筛选
-dly cd                         # 输出 NOTES_DIR 路径，供 cd $(dly cd) 使用
-dly cd t                       # 输出 TASK_DIR 路径（共用目录时同 NOTES_DIR）
+dly cd                         # 在 NOTES_DIR 中启动子 shell
+dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用时同 NOTES_DIR）
 ```
 
 - `-v` / `--view` 只读查看：默认用标准库 `pydoc.pager` 分页，配置
   `VIEWER_CMD` 后改用外部命令；文件不存在报错退出。
 - `-l` / `--list` 每行输出一个文件名，按字典序逆序；pattern 不含
   `* ? [` 时按 `*pattern*` 子串匹配，否则按 glob 匹配；无匹配退出码 1。
-- `cd [task|t]` 输出目录路径：子进程无法切换父 shell 的工作目录，
-  可配合 `cd $(dly cd)` 或 shell 包装函数使用，见 FAQ。
+- `cd [task|t]` 在目录中启动交互式子 shell（`$SHELL`，Windows 取
+  `%COMSPEC%`），`exit` 退出后回到原目录，子 shell 退出码原样透传；
+  加 `-v` 时仅输出目录路径、不进入。
 - 编辑器与查看命令的退出码原样作为脚本退出码。
 
 ### 速查表
@@ -329,8 +330,9 @@ dly cd t                       # 输出 TASK_DIR 路径（共用目录时同 NOT
 | `dly -v …` | 以上任意形式，改为只读查看 |
 | `dly -l [-a] [pattern]` | 列出普通 / 全部类型 |
 | `dly task -l [pattern]` | 列出任务类型 |
-| `dly cd [task|t]` | 输出普通 / 任务目录路径 |
+| `dly cd [task|t]` | 在普通 / 任务目录中启动子 shell |
 | `dly task cd` / `dly t cd` | 同上，task 关键字在前 |
+| `dly cd t -v` | 仅输出目录路径，不启动子 shell |
 
 ### FAQ
 
@@ -348,15 +350,11 @@ dly cd t                       # 输出 TASK_DIR 路径（共用目录时同 NOT
 成功为 `0`；用法错误、无效日期、目录/文件缺失、列表无匹配为 `1`；
 编辑器与查看命令的退出码原样透传。
 
-**为什么 `dly cd` 只输出路径而不切换目录？**
+**`dly cd` 会切换当前目录吗？**
 
-子进程无法修改父 shell 的工作目录，因此 `dly cd` 输出目标目录路径，
-供 `cd $(dly cd)` 使用。若想让 `dly cd` 直接进入目录，可定义 shell
-包装函数（bash/zsh）：
-
-```bash
-dly() { if [ "$1" = "cd" ]; then cd -- "$(command dly cd "${@:2}")"; else command dly "$@"; fi; }
-```
+不会——子进程无法修改父 shell 的工作目录。与 `chezmoi cd` 相同，
+`dly cd` 在目标目录中启动一个交互式子 shell：在其中工作即身处该目录，
+`exit` 退出后回到原目录。只需路径时用 `dly cd -v`（如 `cd $(dly cd -v)`）。
 
 **Windows 下能用吗？**
 
