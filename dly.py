@@ -9,9 +9,15 @@
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
+    dly cd [task|t]
+    dly task|t cd
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
+
+cd 子命令：
+    输出笔记/任务目录路径；子进程无法切换 shell 工作目录，
+    可配合 cd $(dly cd) 或 shell 包装函数进入目标目录
 
 日期表达式：
     （空）         今天
@@ -25,7 +31,7 @@
     YYYYMMDD       完整日期
     YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
 
-当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测与 CLI 参数解析均已实现。
+当前状态：日期解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测、cd 子命令与 CLI 参数解析均已实现。
 """
 
 from __future__ import annotations
@@ -335,6 +341,8 @@ _TASK_WORDS: tuple[str, ...] = ("task", "t")
 _GLOBAL_WORDS: tuple[str, ...] = ("global", "g")
 _LIST_FLAGS: tuple[str, ...] = ("-l", "--list")
 _ALL_FLAGS: tuple[str, ...] = ("-a", "--all")
+# cd 子命令关键字
+_CD_WORD: str = "cd"
 # pattern 缺省值
 _DEFAULT_PATTERN: str = "*"
 
@@ -348,9 +356,15 @@ _USAGE = """\
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
+    dly cd [task|t]
+    dly task|t cd
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
+
+cd 子命令：
+    输出笔记/任务目录路径；子进程无法切换 shell 工作目录，
+    可配合 cd $(dly cd) 或 shell 包装函数进入目标目录
 
 日期表达式：
     （空）         今天
@@ -557,6 +571,21 @@ def _run_list(rest: list[str], base: str) -> int:
     return 0
 
 
+def _run_cd(is_task: bool) -> int:
+    """执行 cd 子命令：输出目标目录路径，返回退出码。
+
+    子进程无法切换父 shell 的工作目录，因此输出目录路径供
+    cd $(dly cd) 或 shell 包装函数使用。is_task 为 True 时输出任务
+    目录（TASK_DIR 为 None 时与笔记目录相同），否则输出笔记目录；
+    目录不存在时沿用 NotesDirError 提示。
+    """
+    target = _task_dir() if is_task else _normal_dir()
+    label = "任务目录" if is_task and TASK_DIR is not None else "笔记目录"
+    _ensure_dir(target, label)
+    print(target)
+    return 0
+
+
 def _run(args: list[str]) -> int:
     """按 PRD 第 4、5 节解析参数并分发执行，返回退出码。"""
     # ---- 列表模式识别（优先于 -v 剥离；列表模式不允许 -v）----
@@ -567,6 +596,19 @@ def _run(args: list[str]) -> int:
     if len(args) >= 2 and args[0] in _GLOBAL_WORDS and args[1] in _LIST_FLAGS:
         # dly global -l / dly g -l：等同普通列表形式
         return _run_list(args[2:], "normal")
+
+    # ---- cd 子命令识别（优先于 -v 剥离；cd 不接受选项）----
+    if args and args[0] == _CD_WORD:
+        # dly cd [task|t]：cd 之后只允许至多一个 task|t
+        cd_rest = args[1:]
+        if len(cd_rest) > 1:
+            raise UsageError(f"未知参数: {cd_rest[1]}")
+        if cd_rest and cd_rest[0] not in _TASK_WORDS:
+            raise UsageError(f"未知参数: {cd_rest[0]}")
+        return _run_cd(bool(cd_rest))
+    if len(args) == 2 and args[0] in _TASK_WORDS and args[1] == _CD_WORD:
+        # dly task cd / dly t cd：输出任务目录路径
+        return _run_cd(True)
 
     # ---- 打开 / 查看模式：剥离最多一个 -v/--view 后按形式解析 ----
     rest, view = _strip_view_flag(args)

@@ -542,6 +542,58 @@ class CliOpenTests(NotesDirTestBase):
         self.assertIn("任务目录不存在", err)
 
 
+class CdTests(NotesDirTestBase):
+    """cd 子命令：输出目标目录路径，供 cd $(dly cd) 或 shell 包装函数使用。"""
+
+    def test_cd_prints_notes_dir(self):
+        code, out, err = self._run("cd")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"{self.notes_dir}\n")
+        self.assertEqual(err, "")
+
+    def test_cd_task_forms_print_task_dir(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)
+        self.tasks_dir.mkdir()
+        for args in (("cd", "t"), ("cd", "task"), ("task", "cd"), ("t", "cd")):
+            with self.subTest(args=args):
+                code, out, _ = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{self.tasks_dir}\n")
+
+    def test_cd_task_shared_dir_falls_back_to_notes_dir(self):
+        # TASK_DIR 为 None 时任务目录与笔记目录共用
+        for args in (("cd", "t"), ("task", "cd")):
+            with self.subTest(args=args):
+                code, out, _ = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{self.notes_dir}\n")
+
+    def test_cd_missing_notes_dir(self):
+        missing = self.base / "missing-daily"
+        self._patch_dir("NOTES_DIR", missing)
+        code, _, err = self._run("cd")
+        self.assertEqual(code, 1)
+        self.assertIn(f"笔记目录不存在: {missing}", err)
+
+    def test_cd_task_missing_task_dir(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)  # tasks_dir 未创建
+        code, _, err = self._run("cd", "task")
+        self.assertEqual(code, 1)
+        self.assertIn(f"任务目录不存在: {self.tasks_dir}", err)
+
+    def test_cd_rejects_unknown_args(self):
+        code, _, err = self._run("cd", "global")
+        self.assertEqual(code, 1)
+        self.assertIn("未知参数: global", err)
+        self.assertIn("用法", err)
+        code, _, err = self._run("cd", "t", "extra")
+        self.assertEqual(code, 1)
+        self.assertIn("未知参数: extra", err)
+        code, _, err = self._run("task", "cd", "extra")
+        self.assertEqual(code, 1)
+        self.assertIn("未知参数", err)
+
+
 @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                  "root 用户不受文件权限限制")
 class WritePermissionTests(NotesDirTestBase):
