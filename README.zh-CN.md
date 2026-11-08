@@ -330,7 +330,7 @@ dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用�
 | `dly -v …` | 以上任意形式，改为只读查看 |
 | `dly -l [-a] [pattern]` | 列出普通 / 全部类型 |
 | `dly task -l [pattern]` | 列出任务类型 |
-| `dly cd [task|t]` | 在普通 / 任务目录中启动子 shell |
+| `dly cd [task\|t]` | 在普通 / 任务目录中启动子 shell |
 | `dly task cd` / `dly t cd` | 同上，task 关键字在前 |
 | `dly cd t -v` | 仅输出目录路径，不启动子 shell |
 

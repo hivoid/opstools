@@ -361,7 +361,7 @@ dly cd t -v                    # print TASK_DIR instead of spawning a shell
 | `dly -v …` | any of the above, view-only |
 | `dly -l [-a] [pattern]` | list regular / all kinds |
 | `dly task -l [pattern]` | list the task kind |
-| `dly cd [task|t]` | sub shell inside the regular / task directory |
+| `dly cd [task\|t]` | sub shell inside the regular / task directory |
 | `dly task cd` / `dly t cd` | same, with the keyword first |
 | `dly cd t -v` | print the directory path instead of spawning a shell |
 
