@@ -571,13 +571,13 @@ def _run_list(rest: list[str], base: str) -> int:
     return 0
 
 
-def _parse_cd_args(rest: list[str]) -> tuple[bool, bool]:
+def _parse_cd_args(rest: list[str], is_task: bool = False) -> tuple[bool, bool]:
     """解析 cd 子命令的剩余参数，返回 (是否任务目录, 是否仅输出路径)。
 
-    允许至多一个 task|t 与至多一个 -v/--view，顺序不限；出现其他
-    参数或重复参数时按用法错误处理。
+    is_task 供 dly task|t cd 形式传入（task 关键字已确定任务目录），
+    此时再出现 task|t 按未知参数拒绝。允许至多一个 -v/--view；
+    出现其他参数或重复参数时按用法错误处理。
     """
-    is_task = False
     view = False
     for arg in rest:
         if arg in _VIEW_FLAGS:
@@ -639,8 +639,8 @@ def _run(args: list[str]) -> int:
         # dly cd [task|t] [-v]
         return _run_cd(*_parse_cd_args(args[1:]))
     if len(args) >= 2 and args[0] in _TASK_WORDS and args[1] == _CD_WORD:
-        # dly task cd [-v] / dly t cd [-v]
-        return _run_cd(True, *_parse_cd_args(args[2:]))
+        # dly task cd [-v] / dly t cd [-v]：task 关键字已确定任务目录
+        return _run_cd(*_parse_cd_args(args[2:], is_task=True))
 
     # ---- 打开 / 查看模式：剥离最多一个 -v/--view 后按形式解析 ----
     rest, view = _strip_view_flag(args)
