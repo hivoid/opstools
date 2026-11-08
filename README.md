@@ -280,6 +280,9 @@ dly -l 2026                                 # list matching file names
   `global.md` and `global.task.md`.
 - **Read-only review** — `dly -v` views without editing; `dly -l -a 2026`
   filters file names by substring or glob to survey existing notes.
+- **Jump into the notes directory** — `dly cd [task|t]` prints the
+  regular/task directory path, ready for `cd $(dly cd)` or a shell
+  wrapper function.
 
 ### Configuration
 
@@ -330,6 +333,8 @@ dly global task                # edit global.task.md (dly task global works too)
 dly -l                         # list regular note file names (reverse order)
 dly -l -a 2026                 # all kinds, file names containing 2026
 dly task -l '*01.task.md'      # task kind, glob pattern
+dly cd                         # print NOTES_DIR for cd $(dly cd)
+dly cd t                       # print TASK_DIR (shared dir falls back to NOTES_DIR)
 ```
 
 - `-v` / `--view` is read-only: pages with the stdlib `pydoc.pager` by
@@ -338,6 +343,9 @@ dly task -l '*01.task.md'      # task kind, glob pattern
 - `-l` / `--list` prints one file name per line in reverse lexicographic
   order; a pattern without `* ? [` is matched as `*pattern*`, otherwise as
   a glob; no match exits `1`.
+- `cd [task|t]` prints the directory path — a child process cannot change
+  the parent shell's working directory; use it as `cd $(dly cd)` or wrap
+  it in a shell function (see the FAQ).
 - The editor's and viewer command's exit codes are passed through as the
   script's exit code.
 
@@ -352,6 +360,8 @@ dly task -l '*01.task.md'      # task kind, glob pattern
 | `dly -v …` | any of the above, view-only |
 | `dly -l [-a] [pattern]` | list regular / all kinds |
 | `dly task -l [pattern]` | list the task kind |
+| `dly cd [task|t]` | print the regular / task directory path |
+| `dly task cd` / `dly t cd` | same, with the keyword first |
 
 ### FAQ
 
@@ -370,6 +380,16 @@ means November 5 of the current year.
 `0` on success; `1` for usage errors, invalid dates, missing
 directories/files, and empty listings; the editor's or viewer's exit code
 is passed through as-is.
+
+**Why does `dly cd` print a path instead of changing directory?**
+
+A child process cannot change its parent shell's working directory, so
+`dly cd` prints the target directory for `cd $(dly cd)`. To make
+`dly cd` switch directly, define a wrapper function (bash/zsh):
+
+```bash
+dly() { if [ "$1" = "cd" ]; then cd -- "$(command dly cd "${@:2}")"; else command dly "$@"; fi; }
+```
 
 **Does it work on Windows?**
 
