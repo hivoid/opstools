@@ -14,6 +14,7 @@
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
+    -h | --help    显示用法说明后退出
 
 cd 子命令：
     在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
@@ -351,6 +352,7 @@ def view_file(path: Path) -> int:
 
 # 选项与关键字。手写解析、不使用 argparse，避免 -1、+2w、2026-11-05 被误判为选项
 _VIEW_FLAGS: tuple[str, ...] = ("-v", "--view")
+_HELP_FLAGS: tuple[str, ...] = ("-h", "--help")
 _TASK_WORDS: tuple[str, ...] = ("task", "t")
 _GLOBAL_WORDS: tuple[str, ...] = ("global", "g")
 _LIST_FLAGS: tuple[str, ...] = ("-l", "--list")
@@ -360,7 +362,7 @@ _CD_WORD: str = "cd"
 # pattern 缺省值
 _DEFAULT_PATTERN: str = "*"
 
-# 用法说明，用法错误时随错误信息一起输出到 stderr
+# 用法说明，用法错误时随错误信息一起输出到 stderr；-h/--help 将其输出到 stdout
 _USAGE = """\
 用法：
     dly [打开选项] [日期表达式] [偏移…]
@@ -375,6 +377,7 @@ _USAGE = """\
 
 打开选项：
     -v | --view    仅查看文件内容，不进入编辑
+    -h | --help    显示用法说明后退出
 
 cd 子命令：
     在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
@@ -647,6 +650,10 @@ def _run_cd(is_task: bool, view: bool) -> int:
 
 def _run(args: list[str]) -> int:
     """按 PRD 第 4、5 节解析参数并分发执行，返回退出码。"""
+    # ---- 帮助选项：任意位置出现 -h/--help 即输出用法说明并以退出码 0 结束 ----
+    if any(arg in _HELP_FLAGS for arg in args):
+        print(_USAGE, end="")
+        return 0
     # ---- 列表模式识别（优先于 -v 剥离；列表模式不允许 -v）----
     if args and args[0] in _LIST_FLAGS:
         return _run_list(args[1:], "normal")
@@ -691,8 +698,9 @@ def _run(args: list[str]) -> int:
 def main(argv: list[str]) -> int:
     """解析命令行参数并分发执行，返回进程退出码。
 
-    用法错误时向 stderr 输出错误信息与用法说明并返回 1；无效日期、
-    目录不存在、文件不存在等错误仅输出对应错误信息并返回 1。
+    -h/--help 在任意位置出现时向 stdout 输出用法说明并返回 0；用法错误
+    时向 stderr 输出错误信息与用法说明并返回 1；无效日期、目录不存在、
+    文件不存在等错误仅输出对应错误信息并返回 1。
     """
     try:
         return _run(list(argv))

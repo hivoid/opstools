@@ -331,6 +331,7 @@ dly -l -a 2026                 # 全部类型中筛选文件名含 2026 的文�
 dly task -l '*01.task.md'      # 任务类型，按 glob 模式筛选
 dly cd                         # 在 NOTES_DIR 中启动子 shell
 dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用时同 NOTES_DIR）
+dly -h                         # 显示用法说明后退出
 ```
 
 - `-v` / `--view` 只读查看：默认用标准库 `pydoc.pager` 分页，配置
@@ -341,6 +342,8 @@ dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用�
 - `cd [task|t]` 在目录中启动交互式子 shell（`$SHELL`，Windows 取
   `%COMSPEC%`），`exit` 退出后回到原目录，子 shell 退出码原样透传；
   加 `-v` 时仅输出目录路径、不进入。
+- `-h` / `--help` 在参数任意位置出现即输出用法说明到 stdout 并以退出码
+  0 结束，优先于其他参数解析。
 - 编辑器与查看命令的退出码原样作为脚本退出码。
 
 ### 速查表
@@ -358,6 +361,7 @@ dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用�
 | `dly cd [task\|t]` | 在普通 / 任务目录中启动子 shell |
 | `dly task cd` / `dly t cd` | 同上，task 关键字在前 |
 | `dly cd t -v` | 仅输出目录路径，不启动子 shell |
+| `dly -h` / `dly --help` | 显示用法说明后退出 |
 
 ### FAQ
 

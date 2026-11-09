@@ -360,6 +360,7 @@ dly -l -a 2026                 # all kinds, file names containing 2026
 dly task -l '*01.task.md'      # task kind, glob pattern
 dly cd                         # spawn a sub shell inside NOTES_DIR
 dly cd t -v                    # print TASK_DIR instead of spawning a shell
+dly -h                         # print the usage text and exit
 ```
 
 - `-v` / `--view` is read-only: pages with the stdlib `pydoc.pager` by
@@ -373,6 +374,8 @@ dly cd t -v                    # print TASK_DIR instead of spawning a shell
   `%COMSPEC%`) inside the directory; `exit` returns to the original
   directory and the sub shell's exit code is passed through. With `-v`
   it only prints the directory path instead.
+- `-h` / `--help` prints the usage text to stdout and exits `0`, wherever
+  it appears among the arguments.
 - The editor's and viewer command's exit codes are passed through as the
   script's exit code.
 
@@ -391,6 +394,7 @@ dly cd t -v                    # print TASK_DIR instead of spawning a shell
 | `dly cd [task\|t]` | sub shell inside the regular / task directory |
 | `dly task cd` / `dly t cd` | same, with the keyword first |
 | `dly cd t -v` | print the directory path instead of spawning a shell |
+| `dly -h` / `dly --help` | print the usage text and exit |
 
 ### FAQ
 

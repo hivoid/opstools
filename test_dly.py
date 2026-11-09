@@ -869,6 +869,46 @@ class WritePermissionTests(NotesDirTestBase):
         viewer.assert_called_once_with(target)
 
 
+class HelpTests(NotesDirTestBase):
+    """-h/--help：任意位置出现即输出用法说明并以退出码 0 结束。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # 全类替换 run_editor，既隔离外部编辑器，也便于断言未被调用
+        patcher = mock.patch.object(dly, "run_editor", return_value=0)
+        self.editor = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_help_prints_usage_to_stdout(self):
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag):
+                code, out, err = self._run(flag)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, dly._USAGE)
+                self.assertEqual(err, "")
+                self.editor.assert_not_called()
+
+    def test_help_any_position_wins(self):
+        # -h/--help 优先于所有模式识别与用法校验（含重复 -v 等）
+        for args in (("-l", "-h"), ("cd", "-h"), ("task", "-h"),
+                     ("-v", "20261105", "-h"), ("1101", "+3m", "--help"),
+                     ("-v", "-v", "-h")):
+            with self.subTest(args=args):
+                code, out, err = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, dly._USAGE)
+                self.assertEqual(err, "")
+                self.editor.assert_not_called()
+
+    def test_help_works_without_notes_dir(self):
+        # 帮助不依赖目录存在：目录缺失时 -h 依旧输出用法说明
+        self._patch_dir("NOTES_DIR", self.base / "missing-daily")
+        code, out, err = self._run("-h")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, dly._USAGE)
+        self.assertEqual(err, "")
+
+
 class CliErrorTests(NotesDirTestBase):
     """PRD 9.3：CLI 用法错误用例。"""
 
