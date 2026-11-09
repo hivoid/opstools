@@ -9,16 +9,17 @@
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
-    dly cd [task|t] [-v]
-    dly task|t cd [-v]
+    dly cd [task|t] [-p]
+    dly task|t cd [-p]
 
 打开选项：
-    -v | --view    仅查看文件内容，不进入编辑
-    -h | --help    显示用法说明后退出
+    -v | --view     仅查看文件内容，不进入编辑
+    -p | --print    输出真实文件路径，不编辑不查看
+    -h | --help     显示用法说明后退出
 
 cd 子命令：
     在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
-    加 -v 不进入，仅输出目录路径，供 cd $(dly cd -v) 使用
+    加 -p 不进入，仅输出目录路径，供 cd $(dly cd -p) 使用
 
 日期表达式：
     （空）         今天
@@ -352,6 +353,7 @@ def view_file(path: Path) -> int:
 
 # 选项与关键字。手写解析、不使用 argparse，避免 -1、+2w、2026-11-05 被误判为选项
 _VIEW_FLAGS: tuple[str, ...] = ("-v", "--view")
+_PRINT_FLAGS: tuple[str, ...] = ("-p", "--print")
 _HELP_FLAGS: tuple[str, ...] = ("-h", "--help")
 _TASK_WORDS: tuple[str, ...] = ("task", "t")
 _GLOBAL_WORDS: tuple[str, ...] = ("global", "g")
@@ -372,16 +374,17 @@ _USAGE = """\
     dly task|t global|g [打开选项]
     dly -l|--list [-a|--all] [pattern]
     dly task|t -l|--list [pattern]
-    dly cd [task|t] [-v]
-    dly task|t cd [-v]
+    dly cd [task|t] [-p]
+    dly task|t cd [-p]
 
 打开选项：
-    -v | --view    仅查看文件内容，不进入编辑
-    -h | --help    显示用法说明后退出
+    -v | --view     仅查看文件内容，不进入编辑
+    -p | --print    输出真实文件路径，不编辑不查看
+    -h | --help     显示用法说明后退出
 
 cd 子命令：
     在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
-    加 -v 不进入，仅输出目录路径，供 cd $(dly cd -v) 使用
+    加 -p 不进入，仅输出目录路径，供 cd $(dly cd -p) 使用
 
 日期表达式：
     （空）         今天
@@ -407,21 +410,29 @@ class DateError(Exception):
     """无效日期，消息形如“无效日期: <表达式>”，退出码 1。"""
 
 
-def _strip_view_flag(args: list[str]) -> tuple[list[str], bool]:
-    """按 PRD 5.2 剥离最多一个 -v/--view，返回 (剩余参数, 是否查看模式)。
+def _strip_open_flags(args: list[str]) -> tuple[list[str], bool, bool]:
+    """按 PRD 5.2 剥离至多一个 -v/--view 与至多一个 -p/--print。
 
-    -v/--view 可出现在任意位置；重复出现按用法错误处理。
+    两者可出现在任意位置；重复出现或同时使用按用法错误处理，
+    返回 (剩余参数, 是否查看模式, 是否打印路径模式)。
     """
     rest: list[str] = []
     view = False
+    print_path = False
     for arg in args:
         if arg in _VIEW_FLAGS:
             if view:
                 raise UsageError("重复使用 -v/--view")
             view = True
+        elif arg in _PRINT_FLAGS:
+            if print_path:
+                raise UsageError("重复使用 -p/--print")
+            print_path = True
         else:
             rest.append(arg)
-    return rest, view
+    if view and print_path:
+        raise UsageError("-v/--view 与 -p/--print 不能同时使用")
+    return rest, view, print_path
 
 
 def _parse_keywords(rest: list[str]) -> tuple[bool, bool, list[str]]:
@@ -532,15 +543,19 @@ def _writable_error(path: Path) -> str | None:
     return None
 
 
-def _open_note(path: Path, view: bool) -> int:
-    """编辑或查看目标笔记，返回退出码。
+def _open_note(path: Path, view: bool, print_path: bool) -> int:
+    """编辑、查看或打印目标笔记路径，返回退出码。
 
-    所在目录不存在时抛出 NotesDirError（编辑与查看均要求目录存在）；
-    查看模式要求文件已存在；编辑模式先经 _writable_error 检测写入权限，
-    不可写时输出提示并返回 1。是否创建文件交由编辑器决定。
+    所在目录不存在时抛出 NotesDirError（编辑、查看与打印路径均要求
+    目录存在）；打印路径模式仅输出真实路径、不要求文件已存在；
+    查看模式要求文件已存在；编辑模式先经 _writable_error 检测写入
+    权限，不可写时输出提示并返回 1。是否创建文件交由编辑器决定。
     """
     if not path.parent.is_dir():
         raise NotesDirError(f"{_dir_label(path)}不存在: {path.parent}")
+    if print_path:
+        print(path)
+        return 0
     if view:
         if not path.is_file():
             print(f"文件不存在: {path}", file=sys.stderr)
@@ -558,10 +573,12 @@ def _run_list(rest: list[str], base: str) -> int:
 
     base 为 "normal"（dly -l / dly global -l）或 "task"（dly task -l）。
     """
-    # 列表模式不允许 -v / --view
+    # 列表模式不允许 -v / --view 与 -p / --print
     for arg in rest:
         if arg in _VIEW_FLAGS:
             raise UsageError("列表模式不支持 -v/--view")
+        if arg in _PRINT_FLAGS:
+            raise UsageError("列表模式不支持 -p/--print")
     if base == "task":
         # 任务列表形式：dly task -l [pattern]，不支持 -a/--all
         if len(rest) > 1:
@@ -600,20 +617,20 @@ def _parse_cd_args(rest: list[str], is_task: bool = False) -> tuple[bool, bool]:
     """解析 cd 子命令的剩余参数，返回 (是否任务目录, 是否仅输出路径)。
 
     is_task 供 dly task|t cd 形式传入（task 关键字已确定任务目录），
-    此时再出现 task|t 按未知参数拒绝。允许至多一个 -v/--view；
+    此时再出现 task|t 按未知参数拒绝。允许至多一个 -p/--print；
     出现其他参数或重复参数时按用法错误处理。
     """
-    view = False
+    print_path = False
     for arg in rest:
-        if arg in _VIEW_FLAGS:
-            if view:
-                raise UsageError("重复使用 -v/--view")
-            view = True
+        if arg in _PRINT_FLAGS:
+            if print_path:
+                raise UsageError("重复使用 -p/--print")
+            print_path = True
         elif arg in _TASK_WORDS and not is_task:
             is_task = True
         else:
             raise UsageError(f"未知参数: {arg}")
-    return is_task, view
+    return is_task, print_path
 
 
 def _cd_shell_cmd() -> list[str]:
@@ -623,20 +640,20 @@ def _cd_shell_cmd() -> list[str]:
     return [os.environ.get("SHELL", "/bin/sh")]
 
 
-def _run_cd(is_task: bool, view: bool) -> int:
+def _run_cd(is_task: bool, print_path: bool) -> int:
     """执行 cd 子命令，返回退出码。
 
     默认在目标目录启动交互式子 shell（chezmoi cd 风格）：父 shell 的
     工作目录不受影响，exit 退出子 shell 后回到原目录，退出码取自
-    子 shell。view 为 True 时不进入，仅输出目录路径，供
-    cd $(dly cd -v) 或 shell 包装函数使用。is_task 为 True 时目标为
+    子 shell。print_path 为 True 时不进入，仅输出目录路径，供
+    cd $(dly cd -p) 或 shell 包装函数使用。is_task 为 True 时目标为
     任务目录（TASK_DIR 为 None 时与笔记目录相同）；目录不存在时
     沿用 NotesDirError 提示。
     """
     target = _task_dir() if is_task else _normal_dir()
     label = "任务目录" if is_task and TASK_DIR is not None else "笔记目录"
     _ensure_dir(target, label)
-    if view:
+    if print_path:
         print(target)
         return 0
     cmd = _cd_shell_cmd()
@@ -654,7 +671,7 @@ def _run(args: list[str]) -> int:
     if any(arg in _HELP_FLAGS for arg in args):
         print(_USAGE, end="")
         return 0
-    # ---- 列表模式识别（优先于 -v 剥离；列表模式不允许 -v）----
+    # ---- 列表模式识别（优先于打开选项剥离；列表模式不允许 -v/-p）----
     if args and args[0] in _LIST_FLAGS:
         return _run_list(args[1:], "normal")
     if len(args) >= 2 and args[0] in _TASK_WORDS and args[1] in _LIST_FLAGS:
@@ -663,7 +680,7 @@ def _run(args: list[str]) -> int:
         # dly global -l / dly g -l：等同普通列表形式
         return _run_list(args[2:], "normal")
 
-    # ---- cd 子命令识别（优先于 -v 剥离；cd 自行解析 task|t 与 -v）----
+    # ---- cd 子命令识别（优先于打开选项剥离；cd 自行解析 task|t 与 -p）----
     if args and args[0] == _CD_WORD:
         # dly cd [task|t] [-v]
         return _run_cd(*_parse_cd_args(args[1:]))
@@ -671,12 +688,12 @@ def _run(args: list[str]) -> int:
         # dly task cd [-v] / dly t cd [-v]：task 关键字已确定任务目录
         return _run_cd(*_parse_cd_args(args[2:], is_task=True))
 
-    # ---- 打开 / 查看模式：剥离最多一个 -v/--view 后按形式解析 ----
-    rest, view = _strip_view_flag(args)
+    # ---- 打开 / 查看 / 打印路径模式：剥离至多一个 -v 与 -p 后按形式解析 ----
+    rest, view, print_path = _strip_open_flags(args)
 
     if not rest:
         # 空参数：普通今天
-        return _open_note(normal_note_path(date.today()), view)
+        return _open_note(normal_note_path(date.today()), view, print_path)
 
     # 前导关键字：task|t 与 global|g 顺序不限，统一解析
     is_task, is_global, tail = _parse_keywords(rest)
@@ -685,14 +702,15 @@ def _run(args: list[str]) -> int:
         # global|g [task|t]：全局普通/任务笔记；global 之后不接受日期表达式与偏移
         if tail:
             raise UsageError(f"未知参数: {tail[0]}")
-        return _open_note(global_task_path() if is_task else global_note_path(), view)
+        return _open_note(global_task_path() if is_task else global_note_path(),
+                          view, print_path)
 
     if is_task:
         # task|t [日期表达式] [偏移…]：任务今天、任务指定日期或再组合偏移
-        return _open_note(task_note_path(_resolve_date_args(tail)), view)
+        return _open_note(task_note_path(_resolve_date_args(tail)), view, print_path)
 
     # 无关键字：[日期表达式] [偏移…]
-    return _open_note(normal_note_path(_resolve_date_args(rest)), view)
+    return _open_note(normal_note_path(_resolve_date_args(rest)), view, print_path)
 
 
 def main(argv: list[str]) -> int:

@@ -283,7 +283,7 @@ dly -l 2026                                 # list matching file names
   filters file names by substring or glob to survey existing notes.
 - **Jump into the notes directory** — `dly cd [task|t]` spawns an
   interactive sub shell inside the regular/task directory (chezmoi
-  cd-style); `dly cd -v` just prints the path.
+  cd-style); `dly cd -p` just prints the path.
 
 ### Configuration
 
@@ -350,6 +350,7 @@ mode (`-l`) such tokens are plain filename patterns.
 ```bash
 dly                            # edit today's regular note
 dly -v 2026-11-05              # view the note for a given date
+dly -p 2026-11-05              # print the note's path instead of opening
 dly task                       # edit today's task note
 dly t -v +1w                   # view next week's task note
 dly 1101 +3m -2d               # edit Nov 1 +3 months -2 days (left to right)
@@ -359,20 +360,22 @@ dly -l                         # list regular note file names (reverse order)
 dly -l -a 2026                 # all kinds, file names containing 2026
 dly task -l '*01.task.md'      # task kind, glob pattern
 dly cd                         # spawn a sub shell inside NOTES_DIR
-dly cd t -v                    # print TASK_DIR instead of spawning a shell
+dly cd t -p                    # print TASK_DIR instead of spawning a shell
 dly -h                         # print the usage text and exit
 ```
 
 - `-v` / `--view` is read-only: pages with the stdlib `pydoc.pager` by
   default, or the configured `VIEWER_CMD`; a missing file exits with an
   error.
+- `-p` / `--print` prints the resolved file path instead of opening it:
+  the containing directory must exist, the file itself may not yet.
 - `-l` / `--list` prints one file name per line in reverse lexicographic
   order; a pattern without `* ? [` is matched as `*pattern*`, otherwise as
   a glob; no match exits `1`. Date tokens like `+1m` are not parsed here —
   they are plain filename patterns.
 - `cd [task|t]` spawns an interactive sub shell (`$SHELL`, on Windows
   `%COMSPEC%`) inside the directory; `exit` returns to the original
-  directory and the sub shell's exit code is passed through. With `-v`
+  directory and the sub shell's exit code is passed through. With `-p`
   it only prints the directory path instead.
 - `-h` / `--help` prints the usage text to stdout and exits `0`, wherever
   it appears among the arguments.
@@ -389,11 +392,12 @@ dly -h                         # print the usage text and exit
 | `dly task` / `dly t` | edit today's task note |
 | `dly g t` | edit `global.task.md` (`task global` works too) |
 | `dly -v …` | any of the above, view-only |
+| `dly -p …` | any of the above, print the resolved path |
 | `dly -l [-a] [pattern]` | list regular / all kinds |
 | `dly task -l [pattern]` | list the task kind |
 | `dly cd [task\|t]` | sub shell inside the regular / task directory |
 | `dly task cd` / `dly t cd` | same, with the keyword first |
-| `dly cd t -v` | print the directory path instead of spawning a shell |
+| `dly cd t -p` | print the directory path instead of spawning a shell |
 | `dly -h` / `dly --help` | print the usage text and exit |
 
 ### FAQ

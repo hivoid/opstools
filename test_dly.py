@@ -462,6 +462,13 @@ class CliListTests(NotesDirTestBase):
                 code, _, _ = self._run(*args)
                 self.assertEqual(code, 1)
 
+    def test_list_with_print_rejected(self):
+        for args in (("-l", "-p"), ("-l", "--print"), ("task", "-l", "-p")):
+            with self.subTest(args=args):
+                code, _, err = self._run(*args)
+                self.assertEqual(code, 1)
+                self.assertIn("列表模式不支持", err)
+
     def test_task_list_rejects_all(self):
         code, _, err = self._run("task", "-l", "-a")
         self.assertEqual(code, 1)
@@ -626,7 +633,7 @@ class CliOpenTests(NotesDirTestBase):
 
 
 class CdTests(NotesDirTestBase):
-    """cd 子命令：默认在目标目录启动子 shell；-v 仅输出目录路径。"""
+    """cd 子命令：默认在目标目录启动子 shell；-p 仅输出目录路径。"""
 
     def test_cd_launches_shell_in_target_dir(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)
@@ -680,49 +687,49 @@ class CdTests(NotesDirTestBase):
         self.assertEqual(code, 1)
         self.assertIn("子 shell 启动失败", err)
 
-    def test_cd_v_prints_notes_dir(self):
-        for args in (("cd", "-v"), ("cd", "--view")):
+    def test_cd_p_prints_notes_dir(self):
+        for args in (("cd", "-p"), ("cd", "--print")):
             with self.subTest(args=args):
                 code, out, err = self._run(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(out, f"{self.notes_dir}\n")
                 self.assertEqual(err, "")
 
-    def test_cd_v_task_forms_print_task_dir(self):
+    def test_cd_p_task_forms_print_task_dir(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)
         self.tasks_dir.mkdir()
-        for args in (("cd", "t", "-v"), ("cd", "-v", "task"),
-                     ("task", "cd", "-v"), ("t", "cd", "--view")):
+        for args in (("cd", "t", "-p"), ("cd", "-p", "task"),
+                     ("task", "cd", "-p"), ("t", "cd", "--print")):
             with self.subTest(args=args):
                 code, out, _ = self._run(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(out, f"{self.tasks_dir}\n")
 
-    def test_cd_v_shared_dir_falls_back_to_notes_dir(self):
+    def test_cd_p_shared_dir_falls_back_to_notes_dir(self):
         # TASK_DIR 为 None 时任务目录与笔记目录共用
-        for args in (("cd", "t", "-v"), ("task", "cd", "-v")):
+        for args in (("cd", "t", "-p"), ("task", "cd", "-p")):
             with self.subTest(args=args):
                 code, out, _ = self._run(*args)
                 self.assertEqual(code, 0)
                 self.assertEqual(out, f"{self.notes_dir}\n")
 
-    def test_cd_v_missing_notes_dir(self):
+    def test_cd_p_missing_notes_dir(self):
         missing = self.base / "missing-daily"
         self._patch_dir("NOTES_DIR", missing)
-        code, _, err = self._run("cd", "-v")
+        code, _, err = self._run("cd", "-p")
         self.assertEqual(code, 1)
         self.assertIn(f"笔记目录不存在: {missing}", err)
 
-    def test_cd_v_missing_task_dir(self):
+    def test_cd_p_missing_task_dir(self):
         self._patch_dir("TASK_DIR", self.tasks_dir)  # tasks_dir 未创建
-        code, _, err = self._run("cd", "task", "-v")
+        code, _, err = self._run("cd", "task", "-p")
         self.assertEqual(code, 1)
         self.assertIn(f"任务目录不存在: {self.tasks_dir}", err)
 
     def test_cd_rejects_unknown_args(self):
         for args in (("cd", "global"), ("cd", "t", "extra"),
-                     ("task", "cd", "extra"), ("cd", "-v", "-v"),
-                     ("cd", "-v", "t", "t")):
+                     ("task", "cd", "extra"), ("cd", "-p", "-p"),
+                     ("cd", "-p", "t", "t"), ("cd", "-v"), ("cd", "--view")):
             with self.subTest(args=args):
                 code, _, err = self._run(*args)
                 self.assertEqual(code, 1)
@@ -907,6 +914,94 @@ class HelpTests(NotesDirTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(out, dly._USAGE)
         self.assertEqual(err, "")
+
+
+class PrintTests(FixedTodayMixin, NotesDirTestBase):
+    """-p/--print：输出解析后的真实文件路径，不编辑不查看。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # 替换编辑器与查看器，便于断言打印路径模式不会触发它们
+        patcher = mock.patch.object(dly, "run_editor", return_value=0)
+        self.editor = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(dly, "view_file", return_value=0)
+        self.viewer = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_print_today(self):
+        expected = self.notes_dir / "20261105.md"
+        for flag in ("-p", "--print"):
+            with self.subTest(flag=flag):
+                code, out, err = self._run(flag)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{expected}\n")
+                self.assertEqual(err, "")
+        self.editor.assert_not_called()
+        self.viewer.assert_not_called()
+
+    def test_print_expr_and_offsets_any_position(self):
+        # 1101 +3m -2d → 2027-01-30；-p 可出现在参数任意位置
+        expected = self.notes_dir / "20270130.md"
+        for args in (("-p", "1101", "+3m", "-2d"), ("1101", "+3m", "-2d", "--print")):
+            with self.subTest(args=args):
+                code, out, err = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{expected}\n")
+                self.assertEqual(err, "")
+        self.editor.assert_not_called()
+        self.viewer.assert_not_called()
+
+    def test_print_task_and_global_forms(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)
+        self.tasks_dir.mkdir()
+        cases = (
+            (("task", "-p"), self.tasks_dir / "20261105.task.md"),
+            (("t", "--print", "1101"), self.tasks_dir / "20261101.task.md"),
+            (("global", "-p"), self.notes_dir / "global.md"),
+            (("g", "t", "-p"), self.tasks_dir / "global.task.md"),
+            (("task", "global", "--print"), self.tasks_dir / "global.task.md"),
+        )
+        for args, expected in cases:
+            with self.subTest(args=args):
+                code, out, err = self._run(*args)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, f"{expected}\n")
+                self.assertEqual(err, "")
+        self.editor.assert_not_called()
+        self.viewer.assert_not_called()
+
+    def test_print_does_not_require_file(self):
+        # 与查看模式不同：只要求目录存在，文件尚不存在时同样输出路径
+        expected = self.notes_dir / "20261231.md"
+        self.assertFalse(expected.exists())
+        code, out, err = self._run("-p", "1231")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"{expected}\n")
+        self.assertEqual(err, "")
+
+    def test_print_missing_notes_dir(self):
+        missing = self.base / "missing-daily"
+        self._patch_dir("NOTES_DIR", missing)
+        code, _, err = self._run("-p")
+        self.assertEqual(code, 1)
+        self.assertIn(f"笔记目录不存在: {missing}", err)
+
+    def test_print_missing_task_dir(self):
+        self._patch_dir("TASK_DIR", self.tasks_dir)  # tasks_dir 未创建
+        code, _, err = self._run("task", "-p")
+        self.assertEqual(code, 1)
+        self.assertIn(f"任务目录不存在: {self.tasks_dir}", err)
+        self.editor.assert_not_called()
+
+    def test_print_rejects_duplicates_and_conflicts(self):
+        for args in (("-p", "-p"), ("--print", "-p"),
+                     ("-v", "-p"), ("-p", "-v"), ("--view", "--print")):
+            with self.subTest(args=args):
+                code, _, err = self._run(*args)
+                self.assertEqual(code, 1)
+                self.assertIn("用法", err)
+        self.editor.assert_not_called()
 
 
 class CliErrorTests(NotesDirTestBase):

@@ -259,7 +259,7 @@ dly -l 2026                                 # 列出匹配的文件名
 - **只读回顾与盘点** — `dly -v` 只查看不编辑；`dly -l -a 2026` 按子串或
   glob 筛选文件名，快速盘点已有笔记。
 - **快速进入笔记目录** — `dly cd [task|t]` 在普通/任务目录中启动交互式
-  子 shell（chezmoi cd 风格）；`dly cd -v` 仅输出路径。
+  子 shell（chezmoi cd 风格）；`dly cd -p` 仅输出路径。
 
 ### 配置
 
@@ -321,6 +321,7 @@ VIEWER_CMD = None                # None = 使用标准库 pydoc.pager；或 ["le
 ```bash
 dly                            # 编辑今天普通笔记
 dly -v 2026-11-05              # 查看指定日期笔记
+dly -p 2026-11-05              # 输出该笔记的真实文件路径
 dly task                       # 编辑今天任务笔记
 dly t -v +1w                   # 查看下周任务笔记
 dly 1101 +3m -2d               # 编辑 11 月 1 日 +3 个月 -2 天（从左到右）
@@ -330,18 +331,20 @@ dly -l                         # 列出普通笔记文件名（字典序逆序�
 dly -l -a 2026                 # 全部类型中筛选文件名含 2026 的文件
 dly task -l '*01.task.md'      # 任务类型，按 glob 模式筛选
 dly cd                         # 在 NOTES_DIR 中启动子 shell
-dly cd t -v                    # 不进入，仅输出 TASK_DIR 路径（共用时同 NOTES_DIR）
+dly cd t -p                    # 不进入，仅输出 TASK_DIR 路径（共用时同 NOTES_DIR）
 dly -h                         # 显示用法说明后退出
 ```
 
 - `-v` / `--view` 只读查看：默认用标准库 `pydoc.pager` 分页，配置
   `VIEWER_CMD` 后改用外部命令；文件不存在报错退出。
+- `-p` / `--print` 输出解析后的真实文件路径而不打开：要求所在目录
+  存在，文件本身可以尚不存在。
 - `-l` / `--list` 每行输出一个文件名，按字典序逆序；pattern 不含
   `* ? [` 时按 `*pattern*` 子串匹配，否则按 glob 匹配；无匹配退出码 1；
   `+1m` 这类日期记号不在此解析，只是文件名 pattern。
 - `cd [task|t]` 在目录中启动交互式子 shell（`$SHELL`，Windows 取
   `%COMSPEC%`），`exit` 退出后回到原目录，子 shell 退出码原样透传；
-  加 `-v` 时仅输出目录路径、不进入。
+  加 `-p` 时仅输出目录路径、不进入。
 - `-h` / `--help` 在参数任意位置出现即输出用法说明到 stdout 并以退出码
   0 结束，优先于其他参数解析。
 - 编辑器与查看命令的退出码原样作为脚本退出码。
@@ -356,11 +359,12 @@ dly -h                         # 显示用法说明后退出
 | `dly task` / `dly t` | 编辑今天的任务笔记 |
 | `dly g t` | 编辑 `global.task.md`（`task global` 亦可） |
 | `dly -v …` | 以上任意形式，改为只读查看 |
+| `dly -p …` | 以上任意形式，改为输出真实文件路径 |
 | `dly -l [-a] [pattern]` | 列出普通 / 全部类型 |
 | `dly task -l [pattern]` | 列出任务类型 |
 | `dly cd [task\|t]` | 在普通 / 任务目录中启动子 shell |
 | `dly task cd` / `dly t cd` | 同上，task 关键字在前 |
-| `dly cd t -v` | 仅输出目录路径，不启动子 shell |
+| `dly cd t -p` | 仅输出目录路径，不启动子 shell |
 | `dly -h` / `dly --help` | 显示用法说明后退出 |
 
 ### FAQ
