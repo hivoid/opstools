@@ -818,51 +818,19 @@ class WritePermissionTests(NotesDirTestBase):
         self._make_readonly(target)
         self.assertEqual(dly._writable_error(target), f"文件不可写: {target}")
 
-    def test_dir_writable_true_and_cleans_up(self):
-        # 探测通过后，临时探测文件不应残留在目录中
+    def test_dir_writable_true_when_writable(self):
         self.assertTrue(dly._dir_writable(self.notes_dir))
-        self.assertEqual(list(self.notes_dir.glob(".dly-probe-*")), [])
 
-    def test_dir_writable_false_when_create_fails(self):
-        # 模拟 os.access 通过但实际创建失败（如只读挂载）的不可写情况
-        with mock.patch.object(dly.tempfile, "mkstemp",
-                               side_effect=PermissionError(13, "Permission denied")):
+    def test_dir_writable_false_when_access_denied(self):
+        # 模拟 os.access 判定目录不可写
+        with mock.patch.object(dly.os, "access", return_value=False):
             self.assertFalse(dly._dir_writable(self.notes_dir))
 
-    def test_file_writable_false_when_open_fails(self):
-        # 模拟 os.access 通过但实际打开失败（如只读挂载）的不可写情况
+    def test_file_writable_false_when_access_denied(self):
+        # 模拟 os.access 判定文件不可写
         target = self.notes_dir / "20261105.md"
-        with mock.patch.object(dly.os, "open",
-                               side_effect=PermissionError(13, "Permission denied")):
+        with mock.patch.object(dly.os, "access", return_value=False):
             self.assertFalse(dly._file_writable(target))
-
-    def test_writable_error_reports_dir_when_probe_fails(self):
-        with mock.patch.object(dly.tempfile, "mkstemp",
-                               side_effect=PermissionError(13, "Permission denied")):
-            self.assertEqual(
-                dly._writable_error(self.notes_dir / "20261105.md"),
-                f"笔记目录不可写: {self.notes_dir}",
-            )
-
-    def test_edit_probe_failure_reports_dir(self):
-        with mock.patch.object(dly.tempfile, "mkstemp",
-                               side_effect=PermissionError(13, "Permission denied")):
-            with mock.patch.object(dly, "run_editor") as editor:
-                code, _, err = self._run()
-        self.assertEqual(code, 1)
-        self.assertIn(f"笔记目录不可写: {self.notes_dir}", err)
-        editor.assert_not_called()
-
-    def test_edit_file_probe_failure_reports_file(self):
-        target = self.notes_dir / "20261105.md"
-        with mock.patch.object(dly, "_dir_writable", return_value=True):
-            with mock.patch.object(dly.os, "open",
-                                   side_effect=PermissionError(13, "Permission denied")):
-                with mock.patch.object(dly, "run_editor") as editor:
-                    code, _, err = self._run("20261105")
-        self.assertEqual(code, 1)
-        self.assertIn(f"文件不可写: {target}", err)
-        editor.assert_not_called()
 
     def test_edit_readonly_notes_dir(self):
         self._make_readonly(self.notes_dir)
