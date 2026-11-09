@@ -10,10 +10,10 @@ over time.
 
 ## Tools
 
-| Tool | Language | Description |
-| --- | --- | --- |
-| [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change |
-| [dly](#dly) | Python 3.8+ | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
+| Tool                | Language     | Description                                                                                                                     |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change                     |
+| [dly](#dly)         | Python 3.8+  | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
 
 ## Principles
 
@@ -139,13 +139,13 @@ DOMAIN  = "domain"
 
 ### Secret forms
 
-| Form | Meaning |
-| --- | --- |
-| bare string / number / boolean | literal value (booleans render as `true` / `false`) |
-| `{ env = "NAME" }` | process environment variable `NAME` |
-| `{ envfile = "PATH", key = "KEY" }` | value of `KEY` in a dotenv file; omit `key` when the file holds exactly one pair |
-| `{ file = "PATH" }` | whole file content, trailing newline stripped (handy for private keys) |
-| `{ chain = [e1, e2, …] }` | try elements in order, first success wins; elements may be literals or references (a nested `chain` is allowed) |
+| Form                                | Meaning                                                                                                         |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| bare string / number / boolean      | literal value (booleans render as `true` / `false`)                                                             |
+| `{ env = "NAME" }`                  | process environment variable `NAME`                                                                             |
+| `{ envfile = "PATH", key = "KEY" }` | value of `KEY` in a dotenv file; omit `key` when the file holds exactly one pair                                |
+| `{ file = "PATH" }`                 | whole file content, trailing newline stripped (handy for private keys)                                          |
+| `{ chain = [e1, e2, …] }`           | try elements in order, first success wins; elements may be literals or references (a nested `chain` is allowed) |
 
 A reference table must set exactly one of `env` / `envfile` / `file` /
 `chain`; unknown or conflicting keys are hard errors. Because a bare string
@@ -158,12 +158,12 @@ consumer's file.
 Each target is rendered in one of four styles: set `style = "..."` explicitly,
 or let keydist infer it from the target's name / path / post command:
 
-| Style | Quoting | Typical consumer |
-| --- | --- | --- |
-| `shell` (default) | POSIX single quotes | anything that `source`s the file — the maximum-compatibility superset |
-| `dotenv` | double quotes, `\n` expanded to newlines | node/python/Go/Ruby dotenv parsers |
-| `systemd` | double quotes, no `export` | systemd `EnvironmentFile=` |
-| `docker` | raw value, no escaping at all | `docker run --env-file` |
+| Style             | Quoting                                  | Typical consumer                                                      |
+| ----------------- | ---------------------------------------- | --------------------------------------------------------------------- |
+| `shell` (default) | POSIX single quotes                      | anything that `source`s the file — the maximum-compatibility superset |
+| `dotenv`          | double quotes, `\n` expanded to newlines | node/python/Go/Ruby dotenv parsers                                    |
+| `systemd`         | double quotes, no `export`               | systemd `EnvironmentFile=`                                            |
+| `docker`          | raw value, no escaping at all            | `docker run --env-file`                                               |
 
 Style-aware checks run before writing: multi-line values are rejected for
 `systemd` and `docker`; `docker` warns where compose and `docker run`
@@ -203,12 +203,12 @@ Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
 
 ### Cheatsheet
 
-| Command | Effect |
-| --- | --- |
-| `keydist` | apply the manifest found via the lookup order |
-| `keydist -c PATH` | apply an explicit manifest |
-| `keydist --dry-run` | preview diffs and post commands; touch nothing |
-| `keydist -n -c PATH` | same, with an explicit manifest |
+| Command              | Effect                                         |
+| -------------------- | ---------------------------------------------- |
+| `keydist`            | apply the manifest found via the lookup order  |
+| `keydist -c PATH`    | apply an explicit manifest                     |
+| `keydist --dry-run`  | preview diffs and post commands; touch nothing |
+| `keydist -n -c PATH` | same, with an explicit manifest                |
 
 ### FAQ
 
@@ -282,8 +282,7 @@ dly -l 2026                                 # list matching file names
 - **Read-only review** — `dly -v` views without editing; `dly -l -a 2026`
   filters file names by substring or glob to survey existing notes.
 - **Jump into the notes directory** — `dly cd [task|t]` spawns an
-  interactive sub shell inside the regular/task directory (chezmoi
-  cd-style); `dly cd -p` just prints the path.
+  interactive sub shell inside the regular/task directory; `dly cd -p` just prints the path.
 
 ### Configuration
 
@@ -303,20 +302,20 @@ in view mode a missing file exits with an error.
 
 ### File names
 
-| Kind | File name | Example |
-| --- | --- | --- |
-| Regular daily note | `YYYYMMDD.md` | `20261105.md` |
-| Daily task note | `YYYYMMDD.task.md` | `20261105.task.md` |
-| Global regular note | `global.md` | — |
-| Global task note | `global.task.md` | — |
+| Kind                | File name          | Example            |
+| ------------------- | ------------------ | ------------------ |
+| Regular daily note  | `YYYYMMDD.md`      | `20261105.md`      |
+| Daily task note     | `YYYYMMDD.task.md` | `20261105.task.md` |
+| Global regular note | `global.md`        | —                  |
+| Global task note    | `global.task.md`   | —                  |
 
 ### Date expressions
 
-| Expression | Meaning | Example (today: 2026-11-05) |
-| --- | --- | --- |
-| (empty) | today | → `20261105.md` |
-| `DD` / `MMDD` / `YYMMDD` | day this month / month-day this year / 20YY month-day | `110312` → 2011-03-12 |
-| `YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` | full date, any year | `19991231` |
+| Expression                                              | Meaning                                               | Example (today: 2026-11-05) |
+| ------------------------------------------------------- | ----------------------------------------------------- | --------------------------- |
+| (empty)                                                 | today                                                 | → `20261105.md`             |
+| `DD` / `MMDD` / `YYMMDD`                                | day this month / month-day this year / 20YY month-day | `110312` → 2011-03-12       |
+| `YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` | full date, any year                                   | `19991231`                  |
 
 ### Date offsets
 
@@ -326,12 +325,12 @@ it must be an offset. With no base date, today is the base — a lone offset
 therefore still works (`dly +1m`). Offsets apply left to right, each onto
 the previous result, and may be mixed and repeated:
 
-| Offset | Meaning |
-| --- | --- |
-| `+N` / `-N[d]` | ±N days |
-| `+Nw` / `-Nw` | ±N weeks |
-| `+Nm` / `-Nm` | ±N calendar months |
-| `+Ny` / `-Ny` | ±N calendar years |
+| Offset         | Meaning            |
+| -------------- | ------------------ |
+| `+N` / `-N[d]` | ±N days            |
+| `+Nw` / `-Nw`  | ±N weeks           |
+| `+Nm` / `-Nm`  | ±N calendar months |
+| `+Ny` / `-Ny`  | ±N calendar years  |
 
 `dly 1101 +3m -2d` is Nov 1 plus 3 months minus 2 days (2027-01-30);
 `dly +3m -2d` is the same computed from today.
@@ -384,21 +383,21 @@ dly -h                         # print the usage text and exit
 
 ### Cheatsheet
 
-| Command | Effect |
-| --- | --- |
-| `dly` | edit today's regular note (`YYYYMMDD.md`) |
-| `dly 1105` / `dly +1m` | edit that date's regular note |
-| `dly 1101 +3m -2d` | edit a base date with composed offsets (left to right) |
-| `dly task` / `dly t` | edit today's task note |
-| `dly g t` | edit `global.task.md` (`task global` works too) |
-| `dly -v …` | any of the above, view-only |
-| `dly -p …` | any of the above, print the resolved path |
-| `dly -l [-a] [pattern]` | list regular / all kinds |
-| `dly task -l [pattern]` | list the task kind |
-| `dly cd [task\|t]` | sub shell inside the regular / task directory |
-| `dly task cd` / `dly t cd` | same, with the keyword first |
-| `dly cd t -p` | print the directory path instead of spawning a shell |
-| `dly -h` / `dly --help` | print the usage text and exit |
+| Command                    | Effect                                                 |
+| -------------------------- | ------------------------------------------------------ |
+| `dly`                      | edit today's regular note (`YYYYMMDD.md`)              |
+| `dly 1105` / `dly +1m`     | edit that date's regular note                          |
+| `dly 1101 +3m -2d`         | edit a base date with composed offsets (left to right) |
+| `dly task` / `dly t`       | edit today's task note                                 |
+| `dly g t`                  | edit `global.task.md` (`task global` works too)        |
+| `dly -v …`                 | any of the above, view-only                            |
+| `dly -p …`                 | any of the above, print the resolved path              |
+| `dly -l [-a] [pattern]`    | list regular / all kinds                               |
+| `dly task -l [pattern]`    | list the task kind                                     |
+| `dly cd [task\|t]`         | sub shell inside the regular / task directory          |
+| `dly task cd` / `dly t cd` | same, with the keyword first                           |
+| `dly cd t -p`              | print the directory path instead of spawning a shell   |
+| `dly -h` / `dly --help`    | print the usage text and exit                          |
 
 ### FAQ
 
@@ -421,7 +420,7 @@ is passed through as-is.
 **Does `dly cd` change the current directory?**
 
 No — a child process cannot change its parent shell's working directory.
-Like `chezmoi cd`, `dly cd` spawns an interactive sub shell inside the
+`dly cd` spawns an interactive sub shell inside the
 target directory: work "in" the directory there, and `exit` returns you
 to where you were. Use `dly cd -v` to print just the path, e.g.
 `cd $(dly cd -v)`.
