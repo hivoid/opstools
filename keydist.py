@@ -9,6 +9,14 @@ keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
     { envfile = "PATH", key = "KEY" }     dotenv 格式文件中的键（单键文件可省略 key）
     { file = "PATH" }                     整文件内容作为值（去末尾换行，适合私钥）
     { chain = [引用或字面量, ...] }        回退链：逐个尝试，首个成功者生效
+    { concat = [引用或字面量, ...] }       拼接：全部元素依次连接，任一失败整体失败
+    { pipe = { cmd = "CMD", input = ... } }
+                                          外部命令处理：input（可省略，与 secret
+                                          值同构）写入 stdin，stdout（去末尾换行）
+                                          为值；命令须确定性且无副作用（dry-run
+                                          下同样执行）
+  任意引用表可加 transform = [op, ...]（闭集，按序应用）：
+    trim / lower / upper / b64 / hex / sha256 / sha512 / urlenc
 - 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
 - 仅在文件内容实际变化时触发 post 事件
 - 每次运行确保目标文件权限为 600
@@ -19,7 +27,9 @@ keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
 """
 
 import argparse
+import base64
 import difflib
+import hashlib
 import os
 import pathlib
 import re
@@ -27,9 +37,11 @@ import shlex
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 
 DEFAULT_STYLE = "shell"
-REF_KINDS = ("env", "envfile", "file", "chain")
+REF_KINDS = ("env", "envfile", "file", "chain", "concat", "pipe")
+TRANSFORM_OPS = ("trim", "lower", "upper", "b64", "hex", "sha256", "sha512", "urlenc")
 
 # ---------------------------------------------------------------------------
 # 终端着色：stdout/stderr 均为 TTY 且未设 NO_COLOR 时启用；纯 ANSI，零依赖
@@ -161,25 +173,82 @@ def _resolve_chain(items: object) -> tuple[str, None] | tuple[None, str]:
     return None, "all fallbacks failed -> " + "; ".join(errs)
 
 
+def _resolve_concat(items: object) -> tuple[str, None] | tuple[None, str]:
+    """{ concat = [...] }：全部元素按序拼接。元素与 secret 值同构（字面量
+    或引用表，允许嵌套 concat / chain）；任一元素失败则整体失败（fail-closed）。"""
+    if not isinstance(items, list) or not items:
+        return None, "concat must be a non-empty array"
+    parts: list[str] = []
+    for i, item in enumerate(items):
+        v, e = resolve_secret(item)
+        if v is None:  # 互斥不变式：值为 None 即失败（Pyright 可收窄 v）
+            return None, f"concat[{i}]: {e}"
+        parts.append(v)
+    return "".join(parts), None
+
+
+def _resolve_pipe(t: dict) -> tuple[str, None] | tuple[None, str]:
+    """{ pipe = { cmd = "CMD", input = <引用或字面量>? } }：外部命令处理。
+    input（可选）写入 stdin，stdout（去末尾换行）为值；非零退出即失败。
+    命令须确定性且无副作用——dry-run 下同样执行（否则无法计算 diff）。"""
+    spec = t["pipe"]
+    if not isinstance(spec, dict):
+        return None, f"pipe must be a table: {spec!r}"
+    extra = set(spec) - {"cmd", "input"}
+    if extra:
+        return None, f"unknown key(s) in pipe: {', '.join(sorted(extra))}"
+    cmd = spec.get("cmd")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return None, f"pipe requires a non-empty cmd: {cmd!r}"
+    stdin_text: str | None = None
+    if "input" in spec:
+        v, e = resolve_secret(spec["input"])
+        if v is None:
+            return None, f"pipe input: {e}"
+        stdin_text = v
+    try:
+        result = subprocess.run(
+            shlex.split(cmd), input=stdin_text or "", capture_output=True,
+            text=True, timeout=30, check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return None, f"pipe cmd failed: {e}"
+    if result.returncode != 0:
+        return None, f"pipe cmd exited {result.returncode}: {result.stderr.strip()}"
+    return result.stdout.rstrip("\n"), None
+
+
 def _resolve_table(t: dict) -> tuple[str, None] | tuple[None, str]:
-    """引用表：env / envfile(+key) / file / chain 恰选其一，未知或冲突键一律报错。"""
+    """引用表：env / envfile(+key) / file / chain / concat / pipe 恰选其一，
+    未知或冲突键一律报错；可选 transform 在解析成功后按序应用。"""
     present = [k for k in REF_KINDS if k in t]
     if not present:
         return None, "reference table must set one of: " + ", ".join(REF_KINDS)
     if len(present) > 1:
-        return None, f"ambiguous reference: both {present[0]!r} and {present[1]!r} set"
+        return None, ("ambiguous reference: only one of "
+                      + ", ".join(repr(k) for k in present) + " may be set")
     kind = present[0]
-    allowed = {kind} | ({"key"} if kind == "envfile" else set())
+    allowed = {kind, "transform"} | ({"key"} if kind == "envfile" else set())
     extra = set(t) - allowed
     if extra:
         return None, f"unknown key(s) in reference: {', '.join(sorted(extra))}"
     if kind == "env":
-        return _resolve_env(t["env"])
-    if kind == "envfile":
-        return _resolve_envfile(t)
-    if kind == "file":
-        return _resolve_file(t)
-    return _resolve_chain(t["chain"])
+        value, err = _resolve_env(t["env"])
+    elif kind == "envfile":
+        value, err = _resolve_envfile(t)
+    elif kind == "file":
+        value, err = _resolve_file(t)
+    elif kind == "chain":
+        value, err = _resolve_chain(t["chain"])
+    elif kind == "concat":
+        value, err = _resolve_concat(t["concat"])
+    else:
+        value, err = _resolve_pipe(t)
+    if value is None:
+        return None, err
+    if "transform" in t:
+        return apply_transform(value, t["transform"])
+    return value, None
 
 
 def resolve_secret(value: object) -> tuple[str, None] | tuple[None, str]:
@@ -195,6 +264,33 @@ def resolve_secret(value: object) -> tuple[str, None] | tuple[None, str]:
         return _resolve_table(value)
     return None, (f"unsupported secret type: {type(value).__name__} "
                   "(expected literal or reference table)")
+
+
+def apply_transform(value: str, ops: object) -> tuple[str, None] | tuple[None, str]:
+    """对值按序应用 transform 白名单中的确定性变换；ops 必须为字符串数组。
+    未知 op 一律硬报错并列出合法值——与引用键的 fail-closed 语义一致。"""
+    if not isinstance(ops, list) or not all(isinstance(op, str) for op in ops):
+        return None, f"transform must be an array of strings: {ops!r}"
+    for op in ops:
+        if op == "trim":
+            value = value.strip()
+        elif op == "lower":
+            value = value.lower()
+        elif op == "upper":
+            value = value.upper()
+        elif op == "b64":
+            value = base64.b64encode(value.encode()).decode("ascii")
+        elif op == "hex":
+            value = value.encode().hex()
+        elif op == "sha256":
+            value = hashlib.sha256(value.encode()).hexdigest()
+        elif op == "sha512":
+            value = hashlib.sha512(value.encode()).hexdigest()
+        elif op == "urlenc":
+            value = urllib.parse.quote(value, safe="")
+        else:
+            return None, f"unknown transform op {op!r} (valid: {', '.join(TRANSFORM_OPS)})"
+    return value, None
 
 # ---------------------------------------------------------------------------
 # 值格式化（各消费端 .env 解析语义不同，保持上一版设计）
@@ -420,6 +516,7 @@ def main() -> None:
 
     failures: list[tuple[str, str]] = []
     counts: dict[str, int] = {}
+    seen_values: dict[str, str] = {}  # secret 名 → 首次解析值；检测非确定性 pipe
 
     for i, (name, target) in enumerate(targets.items()):
         if i:
@@ -453,6 +550,12 @@ def main() -> None:
             if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
                 errors.append(f"secret {src!r} unresolved: {err}")
                 continue
+            if src not in seen_values:
+                seen_values[src] = value
+            elif seen_values[src] != value:
+                print(f"  {yellow('warn:')} secret {src!r} resolved differently this run "
+                      "(non-deterministic pipe?); such targets never converge and "
+                      "post would fire on every run", file=sys.stderr)
             errs, ws = validate_value(style, var, value)
             errors.extend(errs)
             warns.extend(ws)

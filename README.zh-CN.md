@@ -76,6 +76,8 @@ dry-run complete: 1 target(s): would update 1, unchanged 0
   （如重启服务）。
 - **改动前先预览** — `--dry-run` 以 unified diff 展示全部待发生变更，
   确认无误再落地。
+- **在清单里组装值** — `concat` 拼接连接串、`transform` 做哈希/编码等闭集
+  变换、`pipe` 交给 `age` 等外部命令加密，全部无需离开清单。
 
 ### 清单格式
 
@@ -99,12 +101,24 @@ api_key = { env = "API_KEY" }                                 # 进程环境变�
 db_pass = { envfile = "~/.config/db.env", key = "password" }  # dotenv 文件中的键
 ssh_key = { file = "~/.ssh/id_ed25519" }                      # 整文件内容，去末尾换行
 
-# TOML 内联表不可跨行；多元素回退链请用子表写法：
+# TOML 内联表不可跨行；多元素 chain / concat / pipe 请用子表写法：
 [secrets.tls_cert]
 chain = [                        # 回退链：逐个尝试，首个成功者生效
   { env = "TLS_CERT" },
   { file = "~/.local/etc/tls/cert.pem" },
 ]
+
+[secrets.db_url]
+concat = ["postgresql://", { env = "DB_USER" }, ":", { env = "DB_PASS" },
+          "@db.internal/prod"]   # 按序拼接；任一元素失败整体失败
+
+[secrets.seed_b64]
+env = "SEED"
+transform = ["trim", "b64"]      # 闭集 op，按序应用
+
+# 加密等超出字符串拼接的处理交给外部命令（stdin 进、stdout 出）：
+[secrets.encrypted_seed]
+pipe = { cmd = "age -a -r age1replace-with-your-recipient", input = { env = "SEED" } }
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # 必填；展开 ~，自动创建父目录
@@ -137,10 +151,26 @@ DOMAIN  = "domain"
 | `{ envfile = "PATH", key = "KEY" }` | dotenv 文件中 `KEY` 的值；文件恰含一对键值时可省略 `key`             |
 | `{ file = "PATH" }`                 | 整文件内容，去末尾换行（适合私钥）                                   |
 | `{ chain = [e1, e2, …] }`           | 逐元素尝试，首个成功者生效；元素可为字面量或引用（允许嵌套 `chain`） |
+| `{ concat = [e1, e2, …] }`          | 按序连接全部元素；任一元素失败则整体失败（元素与 `chain` 相同）      |
+| `{ pipe = { cmd = "…", input = … } }` | 外部命令处理：可选 `input`（字面量或引用）写入 stdin，stdout（去末尾换行）为值；非零退出即失败 |
 
-引用表必须恰含 `env` / `envfile` / `file` / `chain` 之一，未知键或冲突键
-一律硬报错。裸字符串即字面量、由类型区分，因此不存在可拼错的前缀——
-写错的引用（如 `{ en = "X" }`）会响亮失败，而不是把字面量悄悄写进消费端。
+引用表必须恰含 `env` / `envfile` / `file` / `chain` / `concat` / `pipe`
+之一，未知键或冲突键一律硬报错。裸字符串即字面量、由类型区分，因此不存在
+可拼错的前缀——写错的引用（如 `{ en = "X" }`）会响亮失败，而不是把字面量
+悄悄写进消费端。
+
+任意引用表可加可选的 `transform = [op, …]`：引用解析成功后按序应用一组闭
+集的确定性字符串变换——`trim`、`lower`、`upper`、`b64`、`hex`、`sha256`、
+`sha512`、`urlenc`；未知 op 一律硬报错。变换在目标 style 校验之前执行，
+变换后的值与其他值一样接受校验。要对字面量做变换，包一层即可：
+`{ chain = ["raw"], transform = ["trim"] }`。
+
+`pipe` 把拼接之外的复杂处理——加密、压缩、接入 secret manager（省略
+`input` 的 `{ pipe = { cmd = "op read op://…" } }`）——交给你本就信任的
+外部工具，而不重新实现密码学。secret 经 stdin 传递、绝不进入 argv
+（`/proc` 可见、引号转义易错）。pipe 命令在 `--dry-run` 下同样执行——
+diff 需要真实值——因此必须确定性且无副作用；同一 secret 跨目标解析出
+不同值时会告警，否则每次运行都会被当作“有变化”。
 
 ### 输出 style
 
@@ -154,8 +184,8 @@ DOMAIN  = "domain"
 | `systemd`       | 双引号，无 `export`     | systemd `EnvironmentFile=`           |
 | `docker`        | 裸值，无任何转义        | `docker run --env-file`              |
 
-写入前执行与 style 相关的校验：`systemd` 与 `docker` 拒绝多行值；`docker`
-会就 compose 与 `docker run` 的引号语义分歧给出警告。
+写入前对 transform 之后的值执行与 style 相关的校验：`systemd` 与 `docker`
+拒绝多行值；`docker` 会就 compose 与 `docker run` 的引号语义分歧给出警告。
 
 ### 行为细节
 
@@ -164,6 +194,10 @@ DOMAIN  = "domain"
   `post` 命令——不写文件、不改权限、不执行任何命令。
 - 目标文件始终确保 `0600`；新建文件从一开始就是 `0600`。
 - `post` 经 `shlex` 切分执行，超时 30 秒；非零退出或超时视为该目标失败。
+- `pipe` 命令同样经 `shlex` 切分、超时 30 秒，且在 `--dry-run` 下也会执行；
+  须确定性、无副作用。
+- 同一 secret 跨目标解析值不一致时告警（多半是 `pipe` 引入了非确定性）；
+  否则这类目标永远“有变化”、`post` 每次都会触发。
 - 自动清理历史运行遗留的重复键（附带警告）。
 - 启动时检查清单权限：组/其他用户可读会告警（其中可能含 secret 引用）。
 - 输出在终端上着色；管道输出或设置了 `NO_COLOR` 时自动禁用。
@@ -211,6 +245,12 @@ keydist -c ~/alt.toml   # 显式指定清单
 **为什么清单权限过宽会告警？**
 
 清单里可能含 secret 引用；组/其他用户可读时告警，建议 `chmod 600`。
+
+**为什么 keydist 不自己做加密？**
+
+密码学交给外部：`pipe` 把值经 stdin 交给 `age`、`openssl` 等你本就信任的
+工具。单文件工具内置密码学会带来它无法回答的密钥管理问题——答错的代价
+是静默泄露。
 
 ---
 

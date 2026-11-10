@@ -85,6 +85,10 @@ dry-run complete: 1 target(s): would update 1, unchanged 0
   run automatically.
 - **Change with confidence** — `--dry-run` diffs every pending change
   before anything is touched.
+- **Compose values in the manifest** — `concat` assembles connection
+  strings from several sources, `transform` applies closed-set hashing and
+  encoding ops, and `pipe` hands values to `age` or friends — all without
+  leaving the manifest.
 
 ### Manifest
 
@@ -108,12 +112,25 @@ api_key = { env = "API_KEY" }                                 # process environm
 db_pass = { envfile = "~/.config/db.env", key = "password" }  # key in a dotenv file
 ssh_key = { file = "~/.ssh/id_ed25519" }                      # whole file, trailing newline stripped
 
-# Inline tables cannot span lines (TOML 1.0); use a sub-table for multi-line chains:
+# Inline tables cannot span lines (TOML 1.0); use sub-tables for multi-line
+# chains, concats, and pipes:
 [secrets.tls_cert]
 chain = [                        # fallback chain: first success wins
   { env = "TLS_CERT" },
   { file = "~/.local/etc/tls/cert.pem" },
 ]
+
+[secrets.db_url]
+concat = ["postgresql://", { env = "DB_USER" }, ":", { env = "DB_PASS" },
+          "@db.internal/prod"]   # joined in order; any failing element fails all
+
+[secrets.seed_b64]
+env = "SEED"
+transform = ["trim", "b64"]      # closed op set, applied in order
+
+# Encryption and friends are delegated to external commands (stdin in, stdout out):
+[secrets.encrypted_seed]
+pipe = { cmd = "age -a -r age1replace-with-your-recipient", input = { env = "SEED" } }
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # required; ~ expanded, parents created
@@ -146,12 +163,30 @@ DOMAIN  = "domain"
 | `{ envfile = "PATH", key = "KEY" }` | value of `KEY` in a dotenv file; omit `key` when the file holds exactly one pair                                |
 | `{ file = "PATH" }`                 | whole file content, trailing newline stripped (handy for private keys)                                          |
 | `{ chain = [e1, e2, …] }`           | try elements in order, first success wins; elements may be literals or references (a nested `chain` is allowed) |
+| `{ concat = [e1, e2, …] }`          | join all elements in order; any failing element fails the whole secret (elements as in `chain`)                 |
+| `{ pipe = { cmd = "…", input = … } }` | external command: optional `input` (literal or reference) goes to stdin, stdout minus trailing newline is the value; non-zero exit fails the secret |
 
 A reference table must set exactly one of `env` / `envfile` / `file` /
-`chain`; unknown or conflicting keys are hard errors. Because a bare string
-is a literal by type, there is no prefix to mistype — a misspelled reference
-such as `{ en = "X" }` fails loudly instead of leaking a literal into the
-consumer's file.
+`chain` / `concat` / `pipe`; unknown or conflicting keys are hard errors.
+Because a bare string is a literal by type, there is no prefix to mistype —
+a misspelled reference such as `{ en = "X" }` fails loudly instead of
+leaking a literal into the consumer's file.
+
+Any reference table takes an optional `transform = [op, …]`: a closed set of
+deterministic string operations applied in order once the reference resolves
+— `trim`, `lower`, `upper`, `b64`, `hex`, `sha256`, `sha512`, `urlenc`;
+unknown ops are hard errors. Transforms run before the target style's
+checks, so the transformed value is validated like any other. To transform
+a bare literal, wrap it once: `{ chain = ["raw"], transform = ["trim"] }`.
+
+`pipe` delegates anything beyond string assembly — encryption, compression,
+consulting a secret manager (`{ pipe = { cmd = "op read op://…" } }` with no
+`input`) — to external tools you already trust instead of reimplementing
+crypto here. Secrets travel through stdin, never argv (visible in `/proc`
+and error-prone to quote). Pipe commands execute under `--dry-run` too — the
+diff needs the real value — so they must be deterministic and side-effect
+free; a secret resolving to different values across targets draws a warning,
+since it would make every run look like a change.
 
 ### Output styles
 
@@ -165,9 +200,9 @@ or let keydist infer it from the target's name / path / post command:
 | `systemd`         | double quotes, no `export`               | systemd `EnvironmentFile=`                                            |
 | `docker`          | raw value, no escaping at all            | `docker run --env-file`                                               |
 
-Style-aware checks run before writing: multi-line values are rejected for
-`systemd` and `docker`; `docker` warns where compose and `docker run`
-disagree about quote semantics.
+Style-aware checks run before writing, on the post-`transform` value:
+multi-line values are rejected for `systemd` and `docker`; `docker` warns
+where compose and `docker run` disagree about quote semantics.
 
 ### Behavior
 
@@ -180,6 +215,11 @@ disagree about quote semantics.
   from the start.
 - `post` is split with `shlex` and capped at 30 s; non-zero exit or timeout
   marks the target as failed.
+- `pipe` commands are split with `shlex` and capped at 30 s too, and run
+  even under `--dry-run`; they must be deterministic and side-effect free.
+- A secret resolving to different values in different targets draws a
+  warning — usually a non-deterministic `pipe` — since such targets never
+  converge and `post` would fire on every run.
 - Stale duplicate keys left behind by earlier runs are cleaned up (with a
   warning).
 - The manifest's permissions are checked at startup; group/world-readable
@@ -232,6 +272,13 @@ unchanged targets keep their mtime and skip `post`.
 
 It may contain secret references; group/world-readable modes warn.
 `chmod 600` is recommended.
+
+**Why doesn't keydist encrypt values itself?**
+
+Crypto is delegated: `pipe` hands the value to `age`, `openssl`, or any tool
+you already trust, via stdin. Bundled cryptography would raise key-management
+questions a single-file tool cannot answer — and a wrong answer there is
+silent exposure.
 
 ---
 
