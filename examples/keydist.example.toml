@@ -11,6 +11,24 @@ domain = "example.com"                                          # 裸字符串 =
 # 回退链：优先取环境变量 MYAPP_API_KEY，未设置时落到字面量（演示用）。
 api_key = { chain = [{ env = "MYAPP_API_KEY" }, "demo-key-12345"] }
 
+# 其余引用能力示例——取消注释、并在 [targets."demo".vars] 中引用后生效：
+#
+# 拼接：全部元素按序连接，任一元素失败整体失败（元素与 chain 同构）。
+# [secrets.db_url]
+# concat = ["postgresql://", { env = "DB_USER" }, ":", { env = "DB_PASS" },
+#           "@db.internal/prod"]
+#
+# 变换：闭集 op 按序应用（trim / lower / upper / b64 / hex / sha256 /
+# sha512 / urlenc）；要对字面量做变换，包一层 chain 即可。
+# [secrets.token_sha]
+# env = "API_TOKEN"
+# transform = ["trim", "sha256"]
+#
+# 外部命令：input（可省略）写入 stdin，stdout（去末尾换行）为值；命令须
+# 确定性、无副作用（--dry-run 下同样执行）。加密交给 age 等外部工具。
+# [secrets.encrypted_seed]
+# pipe = { cmd = "age -a -r age1replace-with-your-recipient", input = { env = "SEED" } }
+
 [targets."demo"]
 path = "examples/demo.env"          # 演示目标；实际使用请改为消费者 .env 路径
 post = "echo 'demo.env updated'"    # 演示 post；实际使用如 systemctl --user restart myapp
