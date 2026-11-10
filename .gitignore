@@ -1,0 +1,29 @@
+*.exe
+*.test
+*.out
+*.log
+
+# === 交叉编译与运行时产物 ===
+/dist/
+/build/
+/bin/
+/tmp/
+__pycache__/
+
+# === 编辑器与 IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === 操作系统杂项 ===
+.DS_Store
+Thumbs.db
+
+# === aider 本地状态 ===
+.aider*
+.litellm*
+
+# === 其他自定义排除 ===
+docs/*
