@@ -77,7 +77,8 @@ dry-run complete: 1 target(s): would update 1, unchanged 0
 - **改动前先预览** — `--dry-run` 以 unified diff 展示全部待发生变更，
   确认无误再落地。
 - **在清单里组装值** — `concat` 拼接连接串、`transform` 做哈希/编码等闭集
-  变换、`pipe` 交给 `age` 等外部命令加密，全部无需离开清单。
+  变换、`pipe` 交给 `age` 等外部命令处理（如解密线下加密的密文），全部无需
+  离开清单。
 
 ### 清单格式
 
@@ -116,9 +117,12 @@ concat = ["postgresql://", { env = "DB_USER" }, ":", { env = "DB_PASS" },
 env = "SEED"
 transform = ["trim", "b64"]      # 闭集 op，按序应用
 
-# 加密等超出字符串拼接的处理交给外部命令（stdin 进、stdout 出）：
-[secrets.encrypted_seed]
-pipe = { cmd = "age -a -r age1replace-with-your-recipient", input = { env = "SEED" } }
+# 加密等超出字符串拼接的处理交给外部命令（stdin 进、stdout 出）。在 pipe 里
+# 做加密是非确定性的——age 每次运行都生成新文件密钥——因此取确定性的方向：
+# 线下加密一次、每次运行解密。cmd 不经 shell 执行，cmd 里的 ~ 须写绝对路径
+# （"file" 引用里的 ~ 由 keydist 展开）：
+[secrets.seed]
+pipe = { cmd = "age -d -i /home/me/.config/age/key.txt", input = { file = "~/secrets/seed.age" } }
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # 必填；展开 ~，自动创建父目录
@@ -170,7 +174,9 @@ DOMAIN  = "domain"
 外部工具，而不重新实现密码学。secret 经 stdin 传递、绝不进入 argv
 （`/proc` 可见、引号转义易错）。pipe 命令在 `--dry-run` 下同样执行——
 diff 需要真实值——因此必须确定性且无副作用；同一 secret 跨目标解析出
-不同值时会告警，否则每次运行都会被当作“有变化”。
+不同值时会告警，否则每次运行都会被当作“有变化”。注意方向：`age` 这类
+工具的加密输出天生随机，pipe 应用于解密一份只加密一次的密文（或用固定
+`-S` 盐的 `openssl enc`），而不是现场加密。
 
 ### 输出 style
 
@@ -248,9 +254,9 @@ keydist -c ~/alt.toml   # 显式指定清单
 
 **为什么 keydist 不自己做加密？**
 
-密码学交给外部：`pipe` 把值经 stdin 交给 `age`、`openssl` 等你本就信任的
-工具。单文件工具内置密码学会带来它无法回答的密钥管理问题——答错的代价
-是静默泄露。
+密码学交给外部：用 `age`、`openssl` 等你本就信任的工具线下加密一次，
+`pipe` 经 stdin 把密文交给同一工具、每次运行解密。单文件工具内置密码学
+会带来它无法回答的密钥管理问题——答错的代价是静默泄露。
 
 ---
 

@@ -128,9 +128,13 @@ concat = ["postgresql://", { env = "DB_USER" }, ":", { env = "DB_PASS" },
 env = "SEED"
 transform = ["trim", "b64"]      # closed op set, applied in order
 
-# Encryption and friends are delegated to external commands (stdin in, stdout out):
-[secrets.encrypted_seed]
-pipe = { cmd = "age -a -r age1replace-with-your-recipient", input = { env = "SEED" } }
+# Crypto is delegated to external commands (stdin in, stdout out). Encrypting inside
+# the pipe would be non-deterministic — age mints a fresh file key per run — so use
+# the deterministic direction: encrypt once offline, decrypt on every run. cmd runs
+# without a shell, so ~ in cmd must be an absolute path (~ inside "file" IS expanded
+# by keydist):
+[secrets.seed]
+pipe = { cmd = "age -d -i /home/me/.config/age/key.txt", input = { file = "~/secrets/seed.age" } }
 
 [targets."myapp"]
 path = "~/srv/myapp/.env"                  # required; ~ expanded, parents created
@@ -186,7 +190,9 @@ crypto here. Secrets travel through stdin, never argv (visible in `/proc`
 and error-prone to quote). Pipe commands execute under `--dry-run` too — the
 diff needs the real value — so they must be deterministic and side-effect
 free; a secret resolving to different values across targets draws a warning,
-since it would make every run look like a change.
+since it would make every run look like a change. Mind the direction: tools
+like `age` randomize encryption by design, so pipe is best used to *decrypt*
+a ciphertext encrypted once offline (or `openssl enc` with a fixed `-S` salt).
 
 ### Output styles
 
@@ -275,8 +281,9 @@ It may contain secret references; group/world-readable modes warn.
 
 **Why doesn't keydist encrypt values itself?**
 
-Crypto is delegated: `pipe` hands the value to `age`, `openssl`, or any tool
-you already trust, via stdin. Bundled cryptography would raise key-management
+Crypto is delegated: encrypt once offline with `age`, `openssl`, or any tool
+you already trust, and let `pipe` feed the ciphertext to it via stdin on every
+run. Bundled cryptography would raise key-management
 questions a single-file tool cannot answer — and a wrong answer there is
 silent exposure.
 
