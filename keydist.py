@@ -41,15 +41,38 @@ COLOR = (os.environ.get("NO_COLOR") is None
 
 
 def _c(code: str, s: str) -> str:
+    """按 ANSI 转义码包裹字符串；未启用着色（COLOR 为假）时原样返回。"""
     return f"\x1b[{code}m{s}\x1b[0m" if COLOR else s
 
 
-def bold(s: str) -> str: return _c("1", s)
-def red(s: str) -> str: return _c("31", s)
-def green(s: str) -> str: return _c("32", s)
-def yellow(s: str) -> str: return _c("33", s)
-def cyan(s: str) -> str: return _c("36", s)
-def dim(s: str) -> str: return _c("2", s)
+def bold(s: str) -> str:
+    """加粗文本（标题、目标名、清单路径）。"""
+    return _c("1", s)
+
+
+def red(s: str) -> str:
+    """红色文本（错误信息、失败统计）。"""
+    return _c("31", s)
+
+
+def green(s: str) -> str:
+    """绿色文本（成功状态、diff 新增行）。"""
+    return _c("32", s)
+
+
+def yellow(s: str) -> str:
+    """黄色文本（警告、dry-run 提示、diff 删除行）。"""
+    return _c("33", s)
+
+
+def cyan(s: str) -> str:
+    """青色文本（diff 头/post 标记等中性高亮）。"""
+    return _c("36", s)
+
+
+def dim(s: str) -> str:
+    """暗淡文本（次要信息，如 style 来源、跳过原因）。"""
+    return _c("2", s)
 
 # ---------------------------------------------------------------------------
 # secret 引用解析
@@ -204,6 +227,9 @@ STYLES: dict[str, dict] = {
 
 
 def validate_value(style: str, key: str, value: str) -> tuple[list[str], list[str]]:
+    """按目标 style 校验值能否被对应消费端正确解析。
+    返回 (错误列表, 警告列表)：错误表示必然解析失败（如 docker 不支持
+    转义），警告表示工具间语义有歧义（如引号与 '#' 的处理），需人工确认。"""
     errors: list[str] = []
     warns: list[str] = []
     if style == "docker":
@@ -222,6 +248,7 @@ def validate_value(style: str, key: str, value: str) -> tuple[list[str], list[st
 
 
 def format_env_line(key: str, value: str, style: str, prefix: str = "") -> str:
+    """按 style 渲染一行 KEY=value；style 不允许 export 前缀时忽略传入的 prefix。"""
     st = STYLES[style]
     if not st["allow_export"]:
         prefix = ""
@@ -239,6 +266,9 @@ _STYLE_HINTS: list[tuple[str, str]] = [
 
 
 def resolve_style(name: str, target: dict) -> tuple[str, str]:
+    """确定目标的 .env 格式：显式 style > 目标名/路径/post 关键词自动推断
+    > 默认 shell。返回 (style, 来源)，来源为 "explicit" / "auto" / "default"；
+    显式指定了未知 style 时抛 ValueError。"""
     explicit = target.get("style")
     if explicit:
         if explicit not in STYLES:
@@ -331,6 +361,7 @@ MANIFEST_SEARCH_PATH: tuple[pathlib.Path, ...] = (
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """解析命令行参数：-c/--config 指定清单路径，-n/--dry-run 只预览变更。"""
     p = argparse.ArgumentParser(
         prog="keydist",
         description="把清单里的 secrets 增量分发到各消费端 .env 文件。",
@@ -364,6 +395,9 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """主流程：读取清单 → 逐目标解析 secrets 并做 style 校验 → 渲染并增量
+    写入 .env（内容有变才触发 post）→ 汇总结果。任一 secret 失败即放弃整个
+    目标（fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
     args = parse_args()
     master = find_manifest(args.config)
 
