@@ -638,6 +638,7 @@ def _run_cd(is_task: bool, print_path: bool) -> int:
     if print_path:
         print(target)
         return 0
+    cmd = _cd_shell_cmd()
     code, err = _run_cmd(cmd, cwd=target)
     if err is not None:
         print(f"子 shell 启动失败: {err}", file=sys.stderr)
