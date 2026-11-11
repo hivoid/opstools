@@ -561,11 +561,13 @@ def load_manifest(path: pathlib.Path) -> dict:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         raise ManifestError(f"cannot read manifest {path}: {e}") from e
+    except UnicodeDecodeError as e:
+        # TOML 规定 UTF-8：解码发生在 read_text 内，必须在此捕获并归入
+        # invalid TOML，而非裸 UnicodeDecodeError traceback
+        raise ManifestError(f"invalid TOML in {path}: {e}") from e
     try:
         data = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        # TOML 规定 UTF-8：显式指定编码并把解码错误并入 invalid TOML，
-        # 避免 locale 依赖与裸 UnicodeDecodeError traceback
+    except tomllib.TOMLDecodeError as e:
         raise ManifestError(f"invalid TOML in {path}: {e}") from e
     problems = _validate_manifest(data)
     if problems:
