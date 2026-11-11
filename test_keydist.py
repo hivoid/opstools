@@ -93,6 +93,17 @@ class ParseEnvTextTests(unittest.TestCase):
     def test_unquoted_value_trimmed(self):
         self.assertEqual(keydist.parse_env_text("A =   spaced  "), {"A": "spaced"})
 
+    def test_unquoted_inline_comment_stripped(self):
+        # 行内注释仅对未加引号的值生效，与 python-dotenv 语义一致
+        self.assertEqual(keydist.parse_env_text("A=1 # comment"), {"A": "1"})
+
+    def test_hash_without_preceding_space_kept(self):
+        # # 前无空白时是值的一部分，不是注释
+        self.assertEqual(keydist.parse_env_text("A=a#b"), {"A": "a#b"})
+
+    def test_quoted_hash_kept(self):
+        self.assertEqual(keydist.parse_env_text('A="# keep"'), {"A": "# keep"})
+
     def test_line_without_equals_skipped(self):
         self.assertEqual(keydist.parse_env_text("justtext\nA=1"), {"A": "1"})
 
@@ -195,6 +206,14 @@ class ResolveEnvfileTests(TempDirBase):
         self.assertIsNone(value)
         self.assertIn("not found", err)
 
+    def test_envfile_is_directory_fails_cleanly(self):
+        # exists() 为真但 read_text 失败（如目标是目录）：转错误消息而非 traceback
+        d = self.tmp / "as-dir.env"
+        d.mkdir()
+        value, err = keydist._resolve_envfile({"envfile": str(d), "key": "K"})
+        self.assertIsNone(value)
+        self.assertIn("cannot read envfile", err)
+
 
 class ResolveFileTests(TempDirBase):
     """_resolve_file：{ file = "PATH" } 整文件内容引用（去末尾换行）。"""
@@ -224,6 +243,13 @@ class ResolveFileTests(TempDirBase):
         value, err = keydist._resolve_file({"file": None})
         self.assertIsNone(value)
         self.assertIn("must be a non-empty string", err)
+
+    def test_file_is_directory_fails_cleanly(self):
+        d = self.tmp / "as-dir.pem"
+        d.mkdir()
+        value, err = keydist._resolve_file({"file": str(d)})
+        self.assertIsNone(value)
+        self.assertIn("cannot read file", err)
 
 # ---------------------------------------------------------------------------
 # 引用解析：chain / concat / pipe
@@ -841,6 +867,14 @@ class LoadManifestTests(TempDirBase):
         self.assertIn("invalid TOML", msg)
         self.assertIn("line 1", msg)
 
+    def test_non_utf8_manifest_raises_cleanly(self):
+        # 非 UTF-8 字节流：解码错误归入 invalid TOML，而非裸 UnicodeDecodeError
+        p = self.tmp / "m.toml"
+        p.write_bytes(b'secrets = "\xff\xfe"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("invalid TOML", str(cm.exception))
+
     def test_unknown_top_level_key_rejected(self):
         p = self.tmp / "m.toml"
         p.write_text('target = "x"\n')  # 典型拼写错误（少了 s）
@@ -1063,6 +1097,13 @@ class MainRunTests(MainTestBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.env_path.stat().st_mode & 0o777, 0o600)
 
+    def test_blank_whitespace_post_is_noop(self):
+        # 纯空白 post 等同未配置：不得尝试运行空命令列表（曾触发 IndexError）
+        self.write_manifest(self.default_manifest(post="   "))
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertIn("done", out)
+
     def test_duplicate_key_cleanup_warns(self):
         self.env_path.parent.mkdir(parents=True)
         self.env_path.write_text("APP_TOKEN=old\nAPP_TOKEN=old2\n")
@@ -1217,6 +1258,48 @@ class MainFailureTests(MainTestBase):
         self.assertTrue(self.env_path.exists())  # 文件已写，post 失败单独计入
         self.assertFalse(self.post_marker.exists())
         self.assertIn("post exited", err)
+
+    def test_unwritable_target_dir_fails_cleanly(self):
+        # 目标父目录被普通文件占用：mkdir 的 FileExistsError 转为目标失败
+        (self.tmp / "out").write_text("not a dir")
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertFalse(self.env_path.exists())
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot create target directory", err)
+
+    def test_target_path_is_directory_fails_cleanly(self):
+        # 目标路径被目录占用：render 读取的 IsADirectoryError 转为目标失败
+        occupied = self.tmp / "occupied.env"
+        occupied.mkdir()
+        body = ('[secrets]\nalpha = "v"\n\n'
+                "[targets.app]\n"
+                f"path = {str(occupied)!r}\n"
+                'style = "shell"\n'
+                "\n[targets.app.vars]\n"
+                'K = "alpha"\n')
+        self.write_manifest(body)
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("io error on", err)
+
+
+class MainInterruptTests(MainTestBase):
+    """信号类异常兜底：Ctrl-C → 130；下游关管道 → 静默 1；均无 traceback。"""
+
+    def test_keyboard_interrupt_exits_130(self):
+        with mock.patch.object(keydist, "_process_target",
+                               side_effect=KeyboardInterrupt):
+            code, out, err = self.run_main()
+        self.assertEqual(code, 130)
+        self.assertNotIn("Traceback", err)
+
+    def test_broken_pipe_exits_1_silently(self):
+        with mock.patch.object(keydist, "print", side_effect=BrokenPipeError):
+            code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
 
 
 class MainCliTests(MainTestBase):

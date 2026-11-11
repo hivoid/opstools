@@ -97,7 +97,8 @@ def dim(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 def parse_env_text(text: str) -> dict[str, str]:
-    """极简 dotenv 解析：支持 export 前缀、单双引号、转义、注释、空行。"""
+    """极简 dotenv 解析：支持 export 前缀、单双引号、转义、整行注释、空行；
+    未加引号的值按 dotenv 惯例剥离行内注释（# 前须有空白）。"""
     pairs: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
@@ -117,6 +118,9 @@ def parse_env_text(text: str) -> dict[str, str]:
             else:
                 inner = inner.replace("'\\''", "'")
             val = inner
+        else:
+            # 未加引号的值剥离行内注释（# 前须有空白，避免误伤无空格的 #）
+            val = re.sub(r"\s+#.*$", "", val)
         pairs[key] = val
     return pairs
 
@@ -142,7 +146,11 @@ def _resolve_envfile(t: dict) -> tuple[str, None] | tuple[None, str]:
     path = pathlib.Path(os.path.expanduser(path_str))
     if not path.exists():
         return None, f"envfile not found: {path}"
-    pairs = parse_env_text(path.read_text())
+    try:
+        pairs = parse_env_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        # 存在但不可读/是目录/非 UTF-8：转错误消息，而非裸 traceback
+        return None, f"cannot read envfile {path}: {e}"
     if key is not None:
         if key not in pairs:
             return None, f"key {key!r} not found in {path}"
@@ -162,7 +170,10 @@ def _resolve_file(t: dict) -> tuple[str, None] | tuple[None, str]:
     path = pathlib.Path(os.path.expanduser(path_str))
     if not path.exists():
         return None, f"file not found: {path}"
-    return path.read_text().rstrip("\n"), None
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\n"), None
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"cannot read file {path}: {e}"
 
 
 def _resolve_chain(items: object) -> tuple[str, None] | tuple[None, str]:
@@ -547,12 +558,14 @@ def load_manifest(path: pathlib.Path) -> dict:
     任何目标之前统一发现（fail-fast），避免写了一半才失败。校验失败抛
     ManifestError，消息一次性列出全部结构问题。"""
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError as e:
         raise ManifestError(f"cannot read manifest {path}: {e}") from e
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        # TOML 规定 UTF-8：显式指定编码并把解码错误并入 invalid TOML，
+        # 避免 locale 依赖与裸 UnicodeDecodeError traceback
         raise ManifestError(f"invalid TOML in {path}: {e}") from e
     problems = _validate_manifest(data)
     if problems:
@@ -596,9 +609,10 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
 # ---------------------------------------------------------------------------
 
 def _run_post(post: str | None, changed: bool, dry_run: bool) -> str | None:
-    """执行目标 post 事件：未配置或内容未变化时跳过；dry-run 仅提示将运行。
+    """执行目标 post 事件：未配置（含纯空白，避免 shlex.split 得空命令列表）
+    或内容未变化时跳过；dry-run 仅提示将运行。
     返回失败消息（命令启动失败或非零退出），成功或跳过返回 None。"""
-    if not post:
+    if not post or not post.strip():
         return None
     if not changed:
         print(dim("  post: skipped (no changes)"))
@@ -631,10 +645,16 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
     "updated" / "unchanged" / "would update"，目标失败时为 None。
 
     清单预校验已保证 path 非空、style 合法、vars 引用的 secret 有定义；
-    运行期仍可能失败的是 secret 解析（env 未设、文件缺失、pipe 出错等）
-    与值校验（如 docker 不支持多行值）。"""
+    运行期仍可能失败的是 secret 解析（env 未设、文件缺失、pipe 出错等）、
+    值校验（如 docker 不支持多行值）与目标文件 IO（父目录创建失败、目标
+    不可读或被目录占用、写替换失败）——IO 错误同样转为目标失败而非 traceback。"""
     path = pathlib.Path(os.path.expanduser(target["path"]))
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        msg = f"cannot create target directory {path.parent}: {e}"
+        print(f"{red('error:')} {bold(name)}: {msg}", file=sys.stderr)
+        return None, [msg]
 
     try:
         style, style_src = resolve_style(name, target)
@@ -668,16 +688,24 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
             print(f"  {red('error:')} {e}", file=sys.stderr)
         return None, errors
 
-    original, new_content, render_warns = render_env_file(path, updates, style)
-    changed = new_content != original
-    if dry_run:
-        state = "would update" if changed else "unchanged"
-    else:
-        if changed:
-            write_env_file(path, new_content)
-        elif path.exists():
-            path.chmod(0o600)  # 内容未变也确保权限为 0600
-        state = "updated" if changed else "unchanged"
+    try:
+        original, new_content, render_warns = render_env_file(path, updates, style)
+        changed = new_content != original
+        if dry_run:
+            state = "would update" if changed else "unchanged"
+        else:
+            if changed:
+                write_env_file(path, new_content)
+            elif path.exists():
+                path.chmod(0o600)  # 内容未变也确保权限为 0600
+            state = "updated" if changed else "unchanged"
+    except OSError as e:
+        # 目标不可读/被目录占用/写替换失败（权限、磁盘满）等 IO 错误转为
+        # 目标失败计入汇总；write_env_file 是原子替换，失败时原文件保持
+        # 完整，post 不会在残缺状态上触发
+        msg = f"io error on {path}: {e}"
+        print(f"  {red('error:')} {msg}", file=sys.stderr)
+        return None, [msg]
     state_color = {"updated": green, "would update": yellow}.get(state, dim)
     print(f"  {state_color(f'{state:<14}')}{path}")  # 先对齐后着色，避免转义码破坏列宽
     if dry_run and changed:
@@ -689,12 +717,11 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
     return state, ([] if post_error is None else [post_error])
 
 
-def main() -> None:
-    """主流程：读取并整体校验清单（读失败/语法/结构问题先于一切目标报告）
-    → 逐目标分发到 _process_target（style 解析、secret 解析与校验、增量
-    写入、post 事件）→ 汇总结果。任一 secret 失败即放弃整个目标
-    （fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
-    args = parse_args()
+def _dispatch(args: argparse.Namespace) -> None:
+    """加载并整体校验清单（读失败/语法/结构问题先于一切目标报告）→ 逐目标
+    分发到 _process_target（style 解析、secret 解析与校验、增量写入、post
+    事件）→ 汇总结果。任一 secret 失败即放弃整个目标（fail-closed，绝不
+    写入残缺值）；存在失败时以退出码 1 结束。"""
     master = find_manifest(args.config)
 
     mode = master.stat().st_mode & 0o777
@@ -742,6 +769,24 @@ def main() -> None:
               file=sys.stderr)
         sys.exit(1)
     print(green(f"{verdict}: {len(targets)} target(s): {tally}"))
+
+
+def main() -> None:
+    """入口：分发到 _dispatch 并兜底信号类异常——Ctrl-C 以 130 退出，
+    下游提前关闭管道（EPIPE）时静默以 1 退出（与 dly.py 行为一致）。"""
+    args = parse_args()
+    try:
+        _dispatch(args)
+    except BrokenPipeError:
+        # 下游提前关闭管道（如 keydist -n | head）：把 stdout 指向 devnull，
+        # 防止解释器退出刷新缓冲区时再次抛 BrokenPipeError；静默退出
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass  # stdout 无可用 fd（如被替换为 StringIO，io.UnsupportedOperation）
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)  # 惯例 128+SIGINT；终端已回显 ^C，无需额外输出
 
 
 if __name__ == "__main__":
