@@ -1157,15 +1157,17 @@ class MainDryRunTests(MainTestBase):
 class MainFailureTests(MainTestBase):
     """main() 失败路径：fail-closed 不写残缺值、汇总失败、退出码 1。"""
 
-    def test_undefined_secret_fails_target_without_writing(self):
+    def test_undefined_secret_caught_by_precheck(self):
+        # 未定义的 secret 引用已提前到清单预校验阶段报告（fail-fast），
+        # 不再进入逐目标处理：没有 "N failed" 运行时汇总，也绝不写入文件
         self.write_manifest(self.default_manifest(secrets='other = "x"'))
         code, out, err = self.run_main()
         self.assertEqual(code, 1)
         self.assertFalse(self.env_path.exists())
         self.assertFalse(self.post_marker.exists())
         self.assertIn("not defined in [secrets]", err)
-        self.assertIn("1 failed", err)
-        self.assertIn("- app", err)
+        self.assertIn("1 manifest problem(s)", err)
+        self.assertNotIn("Traceback", err)
 
     def test_unresolved_secret_fails_target(self):
         self.write_manifest(self.default_manifest(
