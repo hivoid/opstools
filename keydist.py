@@ -38,6 +38,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.parse
 
@@ -45,6 +46,8 @@ DEFAULT_STYLE = "shell"
 REF_KINDS = ("env", "envfile", "file", "chain", "concat", "pipe")
 _VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 TRANSFORM_OPS = ("trim", "lower", "upper", "b64", "hex", "sha256", "sha512", "urlenc")
+# pipe secret 与 post 事件的外部命令统一超时（秒）
+_SUBPROC_TIMEOUT = 30
 
 # ---------------------------------------------------------------------------
 # 终端着色：stdout/stderr 均为 TTY 且未设 NO_COLOR 时启用；纯 ANSI，零依赖
@@ -212,7 +215,7 @@ def _resolve_pipe(t: dict) -> tuple[str, None] | tuple[None, str]:
     try:
         result = subprocess.run(
             shlex.split(cmd), input=stdin_text or "", capture_output=True,
-            text=True, timeout=30, check=False,
+            text=True, timeout=_SUBPROC_TIMEOUT, check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         return None, f"pipe cmd failed: {e}"
@@ -392,10 +395,13 @@ def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
     dropped: list[str] = []
     new_lines: list[str] = []
 
+    # 每键预编译一次匹配 pattern，避免逐行重复构造正则
+    key_patterns = [(key, re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}(?=\s*=)"))
+                    for key in updates]
     for line in lines:
         hit = None
-        for key in updates:
-            if re.match(rf"^\s*(?:export\s+)?{re.escape(key)}(?=\s*=)", line):
+        for key, pattern in key_patterns:
+            if pattern.match(line):
                 hit = key
                 break
         if hit is None:
@@ -422,11 +428,22 @@ def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
 
 
 def write_env_file(path: pathlib.Path, content: str) -> None:
-    """以 0600 创建/截断写入，避免首次创建时短暂出现宽权限文件。"""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-    path.chmod(0o600)
+    """以 0600 原子写入：先写同目录临时文件再 os.replace 替换。
+
+    避免截断写入中途崩溃留下残缺的凭证文件；替换后的目标文件权限
+    为 0600，也不存在“首次创建时短暂宽权限”的窗口。"""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def diff_text(path: pathlib.Path, old: str, new: str, indent: str = "    ") -> str:
@@ -578,11 +595,105 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
 # 主流程
 # ---------------------------------------------------------------------------
 
+def _run_post(post: str | None, changed: bool, dry_run: bool) -> str | None:
+    """执行目标 post 事件：未配置或内容未变化时跳过；dry-run 仅提示将运行。
+    返回失败消息（命令启动失败或非零退出），成功或跳过返回 None。"""
+    if not post:
+        return None
+    if not changed:
+        print(dim("  post: skipped (no changes)"))
+        return None
+    if dry_run:
+        print(f"  {cyan('post:')} {yellow('would run:')} {post}")
+        return None
+    print(f"  {cyan('post:')} {post}")
+    try:
+        result = subprocess.run(
+            shlex.split(post), capture_output=True, text=True,
+            timeout=_SUBPROC_TIMEOUT, check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        msg = f"post failed: {e}"
+        print(f"  {red('error:')} {msg}", file=sys.stderr)
+        return msg
+    if result.returncode != 0:
+        msg = f"post exited {result.returncode}: {result.stderr.strip()}"
+        print(f"  {red('error:')} {msg}", file=sys.stderr)
+        return msg
+    print(f"  {cyan('post:')} {green('ok')}")
+    return None
+
+
+def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
+                    seen_values: dict[str, str]) -> tuple[str | None, list[str]]:
+    """处理单个目标：解析 style 与全部 secrets → 校验值 → 渲染并增量写入
+    .env → 按需触发 post。返回 (结果状态, 失败消息列表)：状态为
+    "updated" / "unchanged" / "would update"，目标失败时为 None。
+
+    清单预校验已保证 path 非空、style 合法、vars 引用的 secret 有定义；
+    运行期仍可能失败的是 secret 解析（env 未设、文件缺失、pipe 出错等）
+    与值校验（如 docker 不支持多行值）。"""
+    path = pathlib.Path(os.path.expanduser(target["path"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        style, style_src = resolve_style(name, target)
+    except ValueError as e:
+        print(f"{red('error:')} {bold(name)}: {e}", file=sys.stderr)
+        return None, [str(e)]
+    print(bold(name) + dim(f" ({style}, {style_src})"))
+
+    updates: dict[str, str] = {}
+    errors: list[str] = []
+    warns: list[str] = []
+    for var, src in target.get("vars", {}).items():
+        # 清单预校验已保证 src 在 [secrets] 中有定义；先解析引用，再做 style 校验
+        value, err = resolve_secret(secrets[src])
+        if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
+            errors.append(f"secret {src!r} unresolved: {err}")
+            continue
+        if src not in seen_values:
+            seen_values[src] = value
+        elif seen_values[src] != value:
+            print(f"  {yellow('warn:')} secret {src!r} resolved differently this run "
+                  "(non-deterministic pipe?); such targets never converge and "
+                  "post would fire on every run", file=sys.stderr)
+        errs, ws = validate_value(style, var, value)
+        errors.extend(errs)
+        warns.extend(ws)
+        updates[var] = value
+
+    if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
+        for e in errors:
+            print(f"  {red('error:')} {e}", file=sys.stderr)
+        return None, errors
+
+    original, new_content, render_warns = render_env_file(path, updates, style)
+    changed = new_content != original
+    if dry_run:
+        state = "would update" if changed else "unchanged"
+    else:
+        if changed:
+            write_env_file(path, new_content)
+        elif path.exists():
+            path.chmod(0o600)  # 内容未变也确保权限为 0600
+        state = "updated" if changed else "unchanged"
+    state_color = {"updated": green, "would update": yellow}.get(state, dim)
+    print(f"  {state_color(f'{state:<14}')}{path}")  # 先对齐后着色，避免转义码破坏列宽
+    if dry_run and changed:
+        sys.stdout.write(diff_text(path, original, new_content))
+    for w in warns + render_warns:
+        print(f"  {yellow('warn:')} {w}", file=sys.stderr)
+
+    post_error = _run_post(target.get("post"), changed, dry_run)
+    return state, ([] if post_error is None else [post_error])
+
+
 def main() -> None:
     """主流程：读取并整体校验清单（读失败/语法/结构问题先于一切目标报告）
-    → 逐目标解析 secrets 并做 style 校验 → 渲染并增量
-    写入 .env（内容有变才触发 post）→ 汇总结果。任一 secret 失败即放弃整个
-    目标（fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
+    → 逐目标分发到 _process_target（style 解析、secret 解析与校验、增量
+    写入、post 事件）→ 汇总结果。任一 secret 失败即放弃整个目标
+    （fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
     args = parse_args()
     master = find_manifest(args.config)
 
@@ -614,97 +725,11 @@ def main() -> None:
     for i, (name, target) in enumerate(targets.items()):
         if i:
             print()  # 目标块之间空一行，便于扫读
-        raw_path = target.get("path")
-        if not raw_path:
-            msg = "missing required key 'path'"
-            print(f"{red('error:')} {bold(name)}: {msg}", file=sys.stderr)
-            failures.append((name, msg))
-            continue
-        path = pathlib.Path(os.path.expanduser(raw_path))
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            style, style_src = resolve_style(name, target)
-        except ValueError as e:
-            print(f"{red('error:')} {bold(name)}: {e}", file=sys.stderr)
-            failures.append((name, str(e)))
-            continue
-        print(bold(name) + dim(f" ({style}, {style_src})"))
-
-        updates: dict[str, str] = {}
-        errors: list[str] = []
-        warns: list[str] = []
-        for var, src in target.get("vars", {}).items():
-            if src not in secrets:
-                errors.append(f"secret {src!r} not defined in [secrets]")
-                continue
-            # 先解析 secret 引用，再做 style 校验
-            value, err = resolve_secret(secrets[src])
-            if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
-                errors.append(f"secret {src!r} unresolved: {err}")
-                continue
-            if src not in seen_values:
-                seen_values[src] = value
-            elif seen_values[src] != value:
-                print(f"  {yellow('warn:')} secret {src!r} resolved differently this run "
-                      "(non-deterministic pipe?); such targets never converge and "
-                      "post would fire on every run", file=sys.stderr)
-            errs, ws = validate_value(style, var, value)
-            errors.extend(errs)
-            warns.extend(ws)
-            updates[var] = value
-
-        if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
-            for e in errors:
-                print(f"  {red('error:')} {e}", file=sys.stderr)
-                failures.append((name, e))
-            continue
-
-        original, new_content, render_warns = render_env_file(path, updates, style)
-        changed = new_content != original
-        if args.dry_run:
-            state = "would update" if changed else "unchanged"
-        else:
-            if changed:
-                write_env_file(path, new_content)
-            elif path.exists():
-                path.chmod(0o600)  # 内容未变也确保权限为 0600
-            state = "updated" if changed else "unchanged"
-        state_color = {"updated": green, "would update": yellow}.get(state, dim)
-        print(f"  {state_color(f'{state:<14}')}{path}")  # 先对齐后着色，避免转义码破坏列宽
-        counts[state] = counts.get(state, 0) + 1
-        if args.dry_run and changed:
-            sys.stdout.write(diff_text(path, original, new_content))
-        for w in warns + render_warns:
-            print(f"  {yellow('warn:')} {w}", file=sys.stderr)
-
-        post = target.get("post")
-        if not post:
-            continue
-        if not changed:
-            print(dim("  post: skipped (no changes)"))
-            continue
-        if args.dry_run:
-            print(f"  {cyan('post:')} {yellow('would run:')} {post}")
-            continue
-
-        print(f"  {cyan('post:')} {post}")
-        try:
-            result = subprocess.run(
-                shlex.split(post), capture_output=True, text=True, timeout=30, check=False,
-            )
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            msg = f"post failed: {e}"
-            print(f"  {red('error:')} {msg}", file=sys.stderr)
-            failures.append((name, msg))
-            continue
-
-        if result.returncode != 0:
-            msg = f"post exited {result.returncode}: {result.stderr.strip()}"
-            print(f"  {red('error:')} {msg}", file=sys.stderr)
-            failures.append((name, msg))
-        else:
-            print(f"  {cyan('post:')} {green('ok')}")
+        state, errors = _process_target(name, target, secrets,
+                                        args.dry_run, seen_values)
+        if state is not None:
+            counts[state] = counts.get(state, 0) + 1
+        failures.extend((name, e) for e in errors)
 
     states = ("would update", "unchanged") if args.dry_run else ("updated", "unchanged")
     tally = ", ".join(f"{counts.get(s, 0)} {s}" for s in states)

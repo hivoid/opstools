@@ -1,45 +1,7 @@
 #!/usr/bin/env python3
 """dly - 每日笔记与任务笔记命令行工具。
 
-用法：
-    dly [打开选项] [日期表达式] [偏移…]
-    dly task|t [打开选项] [日期表达式] [偏移…]
-    dly global|g [打开选项]
-    dly global|g task|t [打开选项]
-    dly task|t global|g [打开选项]
-    dly -l|--list [-a|--all] [pattern]
-    dly task|t -l|--list [pattern]
-    dly cd [task|t] [-p]
-    dly task|t cd [-p]
-
-打开选项：
-    -v | --view     仅查看文件内容，不进入编辑
-    -p | --print    输出真实文件路径，不编辑不查看
-    -h | --help     显示用法说明后退出
-
-cd 子命令：
-    在笔记/任务目录中启动交互式子 shell，exit 退出后回到原目录；
-    加 -p 不进入，仅输出目录路径，供 cd $(dly cd -p) 使用
-
-日期表达式：
-    （空）         今天
-    DD             当前年、当前月的第 DD 日
-    MMDD           当前年的指定月日
-    YYMMDD         20YY 年的指定月日
-    YYYYMMDD       完整日期
-    YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD    完整日期
-
-偏移参数（可多个组合，从左到右逐个应用；基准缺省为今天）：
-    +N / -N[d]     ±N 天
-    +Nw / -Nw      ±N 周
-    +Nm / -Nm      ±N 个日历月（目标月不存在该日时截断到月末）
-    +Ny / -Ny      ±N 个日历年（非闰年的 2 月 29 日截断为 2 月 28 日）
-
-    例：dly 1101 +3m -2d   今年 11 月 1 日 3 个月后的前 2 天
-        dly +3m -2d        今天 3 个月后的前 2 天
-
-当前状态：日期与偏移组合解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测、cd 子命令与 CLI 参数解析均已实现。
-"""
+完整的用法与选项说明见 _USAGE（模块加载时拼回 __doc__，保持单一来源）。"""
 
 from __future__ import annotations
 
@@ -308,6 +270,22 @@ def list_notes(list_type: str, pattern: str) -> list[str]:
 # ============================== 编辑 / 查看 ==============================
 
 
+def _run_cmd(cmd: list[str], cwd: Path | None = None) -> tuple[int, str | None]:
+    """启动外部命令（继承 stdin/stdout/stderr），返回 (退出码, 启动失败原因)。
+
+    启动失败（OSError）不抛异常，返回 (1, "CMD: 说明")，由调用方按场景
+    补提示前缀（编辑器/查看器/子 shell）；正常结束返回 (子进程退出码, None)。
+    """
+    try:
+        if cwd is None:
+            result = subprocess.run(cmd)
+        else:
+            result = subprocess.run(cmd, cwd=cwd)
+    except OSError as exc:
+        return 1, f"{cmd}: {exc}"
+    return result.returncode, None
+
+
 def run_editor(path: Path) -> int:
     """使用 EDITOR_CMD 编辑目标文件，返回编辑器退出码。
 
@@ -315,13 +293,10 @@ def run_editor(path: Path) -> int:
     文件不存在不报错，是否创建交由编辑器决定。编辑器命令启动失败时
     向 stderr 输出错误信息，返回 1。
     """
-    cmd = [*EDITOR_CMD, str(path)]
-    try:
-        result = subprocess.run(cmd)
-    except OSError as exc:
-        print(f"编辑器启动失败: {EDITOR_CMD}: {exc}", file=sys.stderr)
-        return 1
-    return result.returncode
+    code, err = _run_cmd([*EDITOR_CMD, str(path)])
+    if err is not None:
+        print(f"编辑器启动失败: {err}", file=sys.stderr)
+    return code
 
 
 def view_file(path: Path) -> int:
@@ -340,13 +315,10 @@ def view_file(path: Path) -> int:
             return 1
         pydoc.pager(text)
         return 0
-    cmd = [*VIEWER_CMD, str(path)]
-    try:
-        result = subprocess.run(cmd)
-    except OSError as exc:
-        print(f"查看命令启动失败: {VIEWER_CMD}: {exc}", file=sys.stderr)
-        return 1
-    return result.returncode
+    code, err = _run_cmd([*VIEWER_CMD, str(path)])
+    if err is not None:
+        print(f"查看命令启动失败: {err}", file=sys.stderr)
+    return code
 
 
 # ============================== CLI 参数解析与入口 ==============================
@@ -397,8 +369,18 @@ cd 子命令：
 偏移参数（可多个组合，从左到右逐个应用；基准缺省为今天）：
     +N / -N[d]     ±N 天
     +Nw / -Nw      ±N 周
-    +Nm / -Nm      ±N 个日历月
-    +Ny / -Ny      ±N 个日历年
+    +Nm / -Nm      ±N 个日历月（目标月不存在该日时截断到月末）
+    +Ny / -Ny      ±N 个日历年（非闰年的 2 月 29 日截断为 2 月 28 日）
+
+    例：dly 1101 +3m -2d   今年 11 月 1 日 3 个月后的前 2 天
+        dly +3m -2d        今天 3 个月后的前 2 天
+"""
+
+# 模块 docstring 的用法段与 _USAGE 同源：加载时整体重建 __doc__，避免两处文案漂移
+__doc__ = f"""dly - 每日笔记与任务笔记命令行工具。
+
+{_USAGE}
+当前状态：日期与偏移组合解析、路径生成、列表筛选、编辑器/查看器调用、写入权限检测、cd 子命令与 CLI 参数解析均已实现。
 """
 
 
@@ -656,13 +638,10 @@ def _run_cd(is_task: bool, print_path: bool) -> int:
     if print_path:
         print(target)
         return 0
-    cmd = _cd_shell_cmd()
-    try:
-        result = subprocess.run(cmd, cwd=target)
-    except OSError as exc:
-        print(f"子 shell 启动失败: {cmd}: {exc}", file=sys.stderr)
-        return 1
-    return result.returncode
+    code, err = _run_cmd(cmd, cwd=target)
+    if err is not None:
+        print(f"子 shell 启动失败: {err}", file=sys.stderr)
+    return code
 
 
 def _run(args: list[str]) -> int:
@@ -682,10 +661,10 @@ def _run(args: list[str]) -> int:
 
     # ---- cd 子命令识别（优先于打开选项剥离；cd 自行解析 task|t 与 -p）----
     if args and args[0] == _CD_WORD:
-        # dly cd [task|t] [-v]
+        # dly cd [task|t] [-p]
         return _run_cd(*_parse_cd_args(args[1:]))
     if len(args) >= 2 and args[0] in _TASK_WORDS and args[1] == _CD_WORD:
-        # dly task cd [-v] / dly t cd [-v]：task 关键字已确定任务目录
+        # dly task cd [-p] / dly t cd [-p]：task 关键字已确定任务目录
         return _run_cd(*_parse_cd_args(args[2:], is_task=True))
 
     # ---- 打开 / 查看 / 打印路径模式：剥离至多一个 -v 与 -p 后按形式解析 ----
