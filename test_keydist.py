@@ -9,6 +9,7 @@
 - style 解析优先级（explicit > auto > default）
 - render_env_file 增量更新（替换、追加、重复键清理、前缀保留）
 - write_env_file 权限、diff_text、find_manifest、parse_args
+- load_manifest：读取失败 / TOML 语法 / 结构类型错误在运行前统一报告
 - main() 端到端：dry-run、post 触发/跳过、fail-closed 与退出码
 """
 
@@ -813,6 +814,142 @@ class FindManifestTests(TempDirBase):
         self.assertIn("--config", stderr.getvalue())
 
 
+class LoadManifestTests(TempDirBase):
+    """load_manifest：读取失败、TOML 语法与结构类型错误统一抛 ManifestError；
+    结构问题一次性全部收集，而非遇到首个即停。"""
+
+    def test_valid_manifest_returns_data(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[secrets]\na = "v"\n\n[targets.t]\npath = "/x"\n')
+        data = keydist.load_manifest(p)
+        self.assertEqual(data["secrets"]["a"], "v")
+        self.assertIn("t", data["targets"])
+
+    def test_unreadable_file_raises(self):
+        d = self.tmp / "not-a-file"
+        d.mkdir()
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(d)
+        self.assertIn("cannot read manifest", str(cm.exception))
+
+    def test_syntax_error_raises_with_location(self):
+        p = self.tmp / "m.toml"
+        p.write_text("[secrets\n")  # 表头未闭合
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        msg = str(cm.exception)
+        self.assertIn("invalid TOML", msg)
+        self.assertIn("line 1", msg)
+
+    def test_unknown_top_level_key_rejected(self):
+        p = self.tmp / "m.toml"
+        p.write_text('target = "x"\n')  # 典型拼写错误（少了 s）
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("unknown top-level key(s): 'target'", str(cm.exception))
+
+    def test_secrets_must_be_table(self):
+        p = self.tmp / "m.toml"
+        p.write_text('secrets = "oops"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("[secrets] must be a table", str(cm.exception))
+
+    def test_targets_must_be_table(self):
+        p = self.tmp / "m.toml"
+        p.write_text("targets = 3\n")
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("[targets] must be a table", str(cm.exception))
+
+    def test_unsupported_secret_value_type(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[secrets]\na = [1, 2]\n\n[targets.t]\npath = "/x"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("secrets.a: unsupported type", str(cm.exception))
+
+    def test_target_must_be_table(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets]\napp = "x"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("targets.app must be a table", str(cm.exception))
+
+    def test_missing_path_key(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets]\n\n[targets.app.vars]\nK = "S"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("missing required key 'path'", str(cm.exception))
+
+    def test_style_and_post_must_be_string(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets.app]\npath = "/x"\nstyle = 1\npost = true\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        msg = str(cm.exception)
+        self.assertIn("targets.app.style must be a string", msg)
+        self.assertIn("targets.app.post must be a string", msg)
+
+    def test_unknown_style_value(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets.app]\npath = "/x"\nstyle = "ini"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("unknown style 'ini'", str(cm.exception))
+
+    def test_empty_style_allowed(self):
+        # 与 resolve_style 一致：空 style 视为未指定，落到 auto/default
+        p = self.tmp / "m.toml"
+        p.write_text('[targets.app]\npath = "/x"\nstyle = ""\n')
+        data = keydist.load_manifest(p)
+        self.assertEqual(data["targets"]["app"]["style"], "")
+
+    def test_unknown_target_key(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets.app]\npath = "/x"\ntypo = 1\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("unknown key(s): typo", str(cm.exception))
+
+    def test_vars_must_be_table(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[targets.app]\npath = "/x"\nvars = "no"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("targets.app.vars must be a table", str(cm.exception))
+
+    def test_var_name_and_reference_validated(self):
+        p = self.tmp / "m.toml"
+        p.write_text('[secrets]\nS = "v"\n\n[targets.app]\npath = "/x"\n\n'
+                     '[targets.app.vars]\n'
+                     '"BAD NAME" = 5\n'
+                     'GOOD = "missing"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        msg = str(cm.exception)
+        self.assertIn("invalid env var name", msg)
+        self.assertIn("secret name must be a string", msg)
+        self.assertIn("secret 'missing' not defined in [secrets]", msg)
+
+    def test_all_problems_reported_at_once(self):
+        p = self.tmp / "m.toml"
+        p.write_text("extra = 1\n"
+                     '[secrets]\na = [1]\n'
+                     '[targets.t]\nstyle = "ini"\n'
+                     '\n[targets.t.vars]\nK = "nope"\n')
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        msg = str(cm.exception)
+        self.assertIn("5 manifest problem(s)", msg)
+        self.assertIn("unknown top-level key(s)", msg)
+        self.assertIn("secrets.a: unsupported type", msg)
+        self.assertIn("missing required key 'path'", msg)
+        self.assertIn("unknown style 'ini'", msg)
+        self.assertIn("secret 'nope' not defined", msg)
+
+
 class ParseArgsTests(unittest.TestCase):
     """parse_args：-c/--config 与 -n/--dry-run。"""
 
@@ -1110,6 +1247,56 @@ class MainCliTests(MainTestBase):
         self.assertEqual(code, 0)
         self.assertIn("no targets defined", err)
         self.assertNotIn("done", out)
+
+
+class MainManifestValidationTests(MainTestBase):
+    """清单问题在任何目标被处理之前统一报告：不写文件、不触发 post、
+    无 Python traceback。"""
+
+    def test_syntax_error_fails_cleanly(self):
+        self.write_manifest("[secrets\nalpha = 'v'\n")  # 表头未闭合
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("invalid TOML", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(self.env_path.exists())
+        self.assertFalse(self.post_marker.exists())
+
+    def test_unreadable_manifest_fails_cleanly(self):
+        bad = self.tmp / "baddir.toml"
+        bad.mkdir()  # 用目录冒充清单触发读取失败
+        code, out, err = self.run_main("-c", str(bad))
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read manifest", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_structural_error_blocks_all_targets(self):
+        # 第一个目标完全正常，第二个引用未定义 secret：
+        # 提前校验应让两个目标都不被写入（而非第一个写完才失败）
+        body = self.default_manifest(post="") + (
+            "\n[targets.second]\n"
+            f"path = {str(self.tmp / 'second.env')!r}\n"
+            "\n[targets.second.vars]\n"
+            'OTHER = "missing"\n'
+        )
+        self.write_manifest(body)
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertFalse(self.env_path.exists())
+        self.assertFalse((self.tmp / "second.env").exists())
+        self.assertIn("not defined in [secrets]", err)
+
+    def test_multiple_problems_listed_together(self):
+        body = ('[secrets]\nalpha = "v"\n\n'
+                '[targets.a]\nstyle = "ini"\n'
+                '\n[targets.a.vars]\nK = "alpha"\n\n'
+                "[targets.b]\npath = 42\n")
+        self.write_manifest(body)
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("unknown style 'ini'", err)
+        self.assertIn("targets.b", err)
+        self.assertFalse(self.env_path.exists())
 
 
 if __name__ == "__main__":

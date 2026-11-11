@@ -24,6 +24,8 @@ keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
   （默认 ~/.config/keydist/keydist.toml）> ~/.local/etc/keydist.toml（旧默认）
   > /etc/keydist/keydist.toml
 - --dry-run：打印将发生变化的 unified diff，不写文件、不执行 post
+- 清单在处理任何目标之前整体校验：读取失败、TOML 语法错误、结构与类型
+  错误一次性全部报告（fail-fast），绝不写到一半才失败
 """
 
 import argparse
@@ -41,6 +43,7 @@ import urllib.parse
 
 DEFAULT_STYLE = "shell"
 REF_KINDS = ("env", "envfile", "file", "chain", "concat", "pipe")
+_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 TRANSFORM_OPS = ("trim", "lower", "upper", "b64", "hex", "sha256", "sha512", "urlenc")
 
 # ---------------------------------------------------------------------------
@@ -117,7 +120,7 @@ def parse_env_text(text: str) -> dict[str, str]:
 
 def _resolve_env(name: object) -> tuple[str, None] | tuple[None, str]:
     """{ env = "NAME" }：进程环境变量。"""
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+    if not isinstance(name, str) or not _VAR_NAME_RE.fullmatch(name):
         return None, f"invalid env var name: {name!r}"
     v = os.environ.get(name)
     if v is None:
@@ -456,6 +459,91 @@ MANIFEST_SEARCH_PATH: tuple[pathlib.Path, ...] = (
 )
 
 
+class ManifestError(Exception):
+    """清单读取 / TOML 语法 / 结构校验失败：在处理任何目标之前统一报告。"""
+
+
+def _validate_manifest(data: dict) -> list[str]:
+    """清单结构校验（纯类型检查，不触碰文件系统、不解析 secret 值）。
+    一次性收集全部问题后返回，而非遇到首个即停。"""
+    errors: list[str] = []
+    extra = set(data) - {"secrets", "targets"}
+    if extra:
+        errors.append("unknown top-level key(s): "
+                      + ", ".join(sorted(repr(k) for k in extra))
+                      + " (valid: secrets, targets)")
+    secrets = data.get("secrets", {})
+    if not isinstance(secrets, dict):
+        errors.append(f"[secrets] must be a table, got {type(secrets).__name__}")
+        secrets = {}
+    else:
+        for name, value in secrets.items():
+            if not isinstance(value, (str, int, float, bool, dict)):
+                errors.append(f"secrets.{name}: unsupported type "
+                              f"{type(value).__name__} "
+                              "(expected literal or reference table)")
+    targets = data.get("targets", {})
+    if not isinstance(targets, dict):
+        errors.append(f"[targets] must be a table, got {type(targets).__name__}")
+        return errors
+    for name, target in targets.items():
+        prefix = f"targets.{name}"
+        if not isinstance(target, dict):
+            errors.append(f"{prefix} must be a table, got {type(target).__name__}")
+            continue
+        for field in ("style", "post"):
+            if field in target and not isinstance(target[field], str):
+                errors.append(f"{prefix}.{field} must be a string, "
+                              f"got {type(target[field]).__name__}")
+        path = target.get("path")
+        if path is None:
+            errors.append(f"{prefix}: missing required key 'path'")
+        elif not isinstance(path, str) or not path:
+            errors.append(f"{prefix}: path must be a non-empty string, "
+                          f"got {type(path).__name__}")
+        style = target.get("style")
+        if isinstance(style, str) and style and style not in STYLES:
+            errors.append(f"{prefix}.style: unknown style {style!r} "
+                          f"(valid: {', '.join(STYLES)})")
+        extra = set(target) - {"path", "style", "post", "vars"}
+        if extra:
+            errors.append(f"{prefix}: unknown key(s): " + ", ".join(sorted(extra)))
+        vars_ = target.get("vars", {})
+        if not isinstance(vars_, dict):
+            errors.append(f"{prefix}.vars must be a table, "
+                          f"got {type(vars_).__name__}")
+            continue
+        for var, src in vars_.items():
+            if not isinstance(var, str) or not _VAR_NAME_RE.fullmatch(var):
+                errors.append(f"{prefix}.vars: invalid env var name {var!r}")
+            if not isinstance(src, str):
+                errors.append(f"{prefix}.vars.{var}: secret name must be a "
+                              f"string, got {type(src).__name__}")
+            elif src not in secrets:
+                errors.append(f"{prefix}.vars.{var}: secret {src!r} "
+                              "not defined in [secrets]")
+    return errors
+
+
+def load_manifest(path: pathlib.Path) -> dict:
+    """读取并校验清单：文件不可读、TOML 语法错误与结构类型错误都在处理
+    任何目标之前统一发现（fail-fast），避免写了一半才失败。校验失败抛
+    ManifestError，消息一次性列出全部结构问题。"""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise ManifestError(f"cannot read manifest {path}: {e}") from e
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ManifestError(f"invalid TOML in {path}: {e}") from e
+    problems = _validate_manifest(data)
+    if problems:
+        raise ManifestError(f"{len(problems)} manifest problem(s):\n  "
+                            + "\n  ".join(problems))
+    return data
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数：-c/--config 指定清单路径，-n/--dry-run 只预览变更。"""
     p = argparse.ArgumentParser(
@@ -491,7 +579,8 @@ def find_manifest(explicit: str | None) -> pathlib.Path:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """主流程：读取清单 → 逐目标解析 secrets 并做 style 校验 → 渲染并增量
+    """主流程：读取并整体校验清单（读失败/语法/结构问题先于一切目标报告）
+    → 逐目标解析 secrets 并做 style 校验 → 渲染并增量
     写入 .env（内容有变才触发 post）→ 汇总结果。任一 secret 失败即放弃整个
     目标（fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
     args = parse_args()
@@ -502,7 +591,11 @@ def main() -> None:
         print(f"{yellow('warning:')} {master} is too permissive ({oct(mode)}); "
               "it may contain secret references — chmod 600 recommended", file=sys.stderr)
 
-    data = tomllib.loads(master.read_text())
+    try:
+        data = load_manifest(master)
+    except ManifestError as e:
+        print(f"{red('error:')} {e}", file=sys.stderr)
+        sys.exit(1)
     secrets = data.get("secrets", {})
     targets = data.get("targets", {})
 
