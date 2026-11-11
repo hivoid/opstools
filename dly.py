@@ -75,26 +75,28 @@ def parse_date_expr(expr: str, today: date) -> date:
     if expr == "":
         return today
 
+    # 数字模式仅接受 ASCII 数字（[0-9]，与 _RELATIVE_RE 的写法一致），
+    # 拒绝全角数字等 Unicode 十进制字符
     # 1-2 位数字：DD，使用当前年和当前月
-    if re.fullmatch(r"\d{1,2}", expr):
+    if re.fullmatch(r"[0-9]{1,2}", expr):
         return _make_date(today.year, today.month, int(expr), expr)
 
     # 3-4 位数字：MMDD，左补零到 4 位，年份取当前年
-    if re.fullmatch(r"\d{3,4}", expr):
+    if re.fullmatch(r"[0-9]{3,4}", expr):
         mmdd = expr.zfill(4)
         return _make_date(today.year, int(mmdd[:2]), int(mmdd[2:]), expr)
 
     # 6 位数字：YYMMDD，解释为 20YYMMDD
-    if re.fullmatch(r"\d{6}", expr):
+    if re.fullmatch(r"[0-9]{6}", expr):
         year = 2000 + int(expr[:2])
         return _make_date(year, int(expr[2:4]), int(expr[4:]), expr)
 
     # 8 位数字：YYYYMMDD
-    if re.fullmatch(r"\d{8}", expr):
+    if re.fullmatch(r"[0-9]{8}", expr):
         return _make_date(int(expr[:4]), int(expr[4:6]), int(expr[6:]), expr)
 
     # 完整日期：三种分隔符（-、/、.），要求前后使用同一分隔符
-    m = re.fullmatch(r"(\d{4})([-/.])(\d{2})\2(\d{2})", expr)
+    m = re.fullmatch(r"([0-9]{4})([-/.])([0-9]{2})\2([0-9]{2})", expr)
     if m is not None:
         return _make_date(int(m.group(1)), int(m.group(3)), int(m.group(4)), expr)
 
@@ -133,7 +135,7 @@ _GLOBAL_TASK_NAME = "global.task.md"
 
 
 class NotesDirError(Exception):
-    """笔记目录或任务目录不存在，消息形如“笔记目录不存在: <路径>”。"""
+    """笔记/任务目录不存在或不可读，消息形如“笔记目录不存在: <路径>”。"""
 
 
 def _normal_dir() -> Path:
@@ -214,7 +216,12 @@ def _collect_names(dir_path: Path, kinds: set[str]) -> set[str]:
         date_res.append(_DATE_TASK_RE)
 
     names: set[str] = set()
-    for entry in dir_path.iterdir():
+    try:
+        entries = list(dir_path.iterdir())
+    except OSError as exc:
+        # 目录存在但不可读（如权限 000）：转为 NotesDirError 走统一错误出口
+        raise NotesDirError(f"目录不可读: {dir_path}: {exc}") from exc
+    for entry in entries:
         if not entry.is_file():
             continue
         name = entry.name
@@ -241,7 +248,7 @@ def list_notes(list_type: str, pattern: str) -> list[str]:
 
     list_type: "normal" 普通类型 / "task" 任务类型 / "all" 全部类型。
     pattern: glob 模式；不含 * ? [ 时自动转换为 *pattern* 子串匹配。
-    所需目录不存在时抛出 NotesDirError；无匹配时返回空列表，
+    所需目录不存在或不可读时抛出 NotesDirError；无匹配时返回空列表，
     由 main 输出“没有匹配的文件: <pattern>”并以退出码 1 结束。
     """
     normal_d = _normal_dir()
@@ -444,9 +451,9 @@ def _looks_like_date_expr(expr: str) -> bool:
     用于区分“格式不符”（按用法错误处理）与“格式相符但日期非法”
     （按无效日期处理，如 20261301）；偏移文法由 _RELATIVE_RE 单独判断。
     """
-    if re.fullmatch(r"\d{1,2}|\d{3,4}|\d{6}|\d{8}", expr) is not None:
+    if re.fullmatch(r"[0-9]{1,2}|[0-9]{3,4}|[0-9]{6}|[0-9]{8}", expr) is not None:
         return True
-    return re.fullmatch(r"\d{4}[-/.]\d{2}[-/.]\d{2}", expr) is not None
+    return re.fullmatch(r"[0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2}", expr) is not None
 
 
 def _split_date_args(tail: list[str]) -> tuple[str, list[str]]:
@@ -530,8 +537,9 @@ def _open_note(path: Path, view: bool, print_path: bool) -> int:
 
     所在目录不存在时抛出 NotesDirError（编辑、查看与打印路径均要求
     目录存在）；打印路径模式仅输出真实路径、不要求文件已存在；
-    查看模式要求文件已存在；编辑模式先经 _writable_error 检测写入
-    权限，不可写时输出提示并返回 1。是否创建文件交由编辑器决定。
+    查看模式要求文件已存在；编辑模式要求目标不是已存在的目录，并经
+    _writable_error 检测写入权限，不可写时输出提示并返回 1。是否创建
+    文件交由编辑器决定。
     """
     if not path.parent.is_dir():
         raise NotesDirError(f"{_dir_label(path)}不存在: {path.parent}")
@@ -543,6 +551,9 @@ def _open_note(path: Path, view: bool, print_path: bool) -> int:
             print(f"文件不存在: {path}", file=sys.stderr)
             return 1
         return view_file(path)
+    if path.is_dir():
+        print(f"无法编辑目录: {path}", file=sys.stderr)
+        return 1
     error = _writable_error(path)
     if error is not None:
         print(error, file=sys.stderr)
@@ -616,10 +627,13 @@ def _parse_cd_args(rest: list[str], is_task: bool = False) -> tuple[bool, bool]:
 
 
 def _cd_shell_cmd() -> list[str]:
-    """返回用于进入目录的交互式 shell 命令。"""
+    """返回用于进入目录的交互式 shell 命令。
+
+    SHELL/COMSPEC 须为单个可执行文件路径（不含参数）；未设置或为空串
+    时回退到默认 shell。"""
     if os.name == "nt":
-        return [os.environ.get("COMSPEC", "cmd.exe")]
-    return [os.environ.get("SHELL", "/bin/sh")]
+        return [os.environ.get("COMSPEC") or "cmd.exe"]
+    return [os.environ.get("SHELL") or "/bin/sh"]
 
 
 def _run_cd(is_task: bool, print_path: bool) -> int:
@@ -698,7 +712,8 @@ def main(argv: list[str]) -> int:
 
     -h/--help 在任意位置出现时向 stdout 输出用法说明并返回 0；用法错误
     时向 stderr 输出错误信息与用法说明并返回 1；无效日期、目录不存在、
-    文件不存在等错误仅输出对应错误信息并返回 1。
+    文件不存在等错误仅输出对应错误信息并返回 1；Ctrl-C 返回 130，
+    下游提前关闭管道（EPIPE）时静默返回 1。
     """
     try:
         return _run(list(argv))
@@ -709,6 +724,16 @@ def main(argv: list[str]) -> int:
     except (DateError, NotesDirError) as exc:
         print(exc, file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # 下游提前关闭管道（如 dly -l | head）：把 stdout 指向 devnull，
+        # 防止解释器退出刷新缓冲区时再次抛 BrokenPipeError；静默返回 1
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass  # stdout 无可用 fd（如被替换为 StringIO，io.UnsupportedOperation）
+        return 1
+    except KeyboardInterrupt:
+        return 130  # 惯例 128+SIGINT；终端已回显 ^C，无需额外输出
 
 
 if __name__ == "__main__":

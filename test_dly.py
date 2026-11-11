@@ -322,6 +322,13 @@ class ListNotesTests(NotesDirTestBase):
             ["global.md", "20261105.md", "20260101.task.md", "20251231.md"],
         )
 
+    def test_unreadable_dir_raises(self):
+        # 目录存在但不可读：iterdir 的 OSError 转为 NotesDirError（统一错误出口）
+        with mock.patch.object(Path, "iterdir",
+                               side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaisesRegex(dly.NotesDirError, "目录不可读"):
+                dly.list_notes("normal", "*")
+
 
 class RunEditorAndViewFileTests(NotesDirTestBase):
     """PRD FR-4 / FR-6：编辑器与查看器调用。"""
@@ -608,6 +615,17 @@ class CliOpenTests(NotesDirTestBase):
             code, _, _ = self._run("global")
         self.assertEqual(code, 7)
 
+    def test_edit_target_is_directory(self):
+        # 目标被建成目录时不得调用编辑器
+        target = self.notes_dir / "20261105.md"
+        target.unlink()
+        target.mkdir()
+        with mock.patch.object(dly, "run_editor") as editor:
+            code, _, err = self._run("20261105")
+        self.assertEqual(code, 1)
+        self.assertIn(f"无法编辑目录: {target}", err)
+        editor.assert_not_called()
+
     def test_open_missing_notes_dir(self):
         missing = self.base / "missing-daily"
         self._patch_dir("NOTES_DIR", missing)
@@ -657,6 +675,15 @@ class CdTests(NotesDirTestBase):
     def test_cd_shell_defaults_to_sh_without_shell_env(self):
         env = {k: v for k, v in os.environ.items() if k != "SHELL"}
         with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(dly.subprocess, "run",
+                                   return_value=mock.Mock(returncode=0)) as run:
+                code, _, _ = self._run("cd")
+        self.assertEqual(code, 0)
+        run.assert_called_once_with(["/bin/sh"], cwd=self.notes_dir)
+
+    def test_cd_shell_empty_shell_env_falls_back_to_sh(self):
+        # SHELL 为空串与未设置同等对待，均回退 /bin/sh
+        with mock.patch.dict(os.environ, {"SHELL": ""}):
             with mock.patch.object(dly.subprocess, "run",
                                    return_value=mock.Mock(returncode=0)) as run:
                 code, _, _ = self._run("cd")
@@ -1059,6 +1086,17 @@ class CliErrorTests(NotesDirTestBase):
         self.assertEqual(code, 1)
         self.assertIn("用法：", err)
         self.assertIn("dly task|t -l|--list [pattern]", err)
+
+    def test_keyboard_interrupt_returns_130(self):
+        with mock.patch.object(dly, "_run", side_effect=KeyboardInterrupt):
+            code, _, _ = self._run()
+        self.assertEqual(code, 130)
+
+    def test_broken_pipe_returns_1_silently(self):
+        with mock.patch.object(dly, "_run", side_effect=BrokenPipeError):
+            code, _, err = self._run()
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
 
 
 if __name__ == "__main__":
