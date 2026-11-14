@@ -933,12 +933,14 @@ class LoadManifestTests(TempDirBase):
             keydist.load_manifest(p)
         self.assertIn("unknown style 'ini'", str(cm.exception))
 
-    def test_empty_style_allowed(self):
-        # 与 resolve_style 一致：空 style 视为未指定，落到 auto/default
+    def test_empty_style_rejected(self):
+        # 空串与未知 style 同样拒绝：显式写入的空 style 几乎必然是手误，
+        # 静默回退 auto 推断（依赖目标名/路径关键词）违背 fail-closed
         p = self.tmp / "m.toml"
         p.write_text('[targets.app]\npath = "/x"\nstyle = ""\n')
-        data = keydist.load_manifest(p)
-        self.assertEqual(data["targets"]["app"]["style"], "")
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        self.assertIn("unknown style ''", str(cm.exception))
 
     def test_unknown_target_key(self):
         p = self.tmp / "m.toml"

@@ -45,6 +45,8 @@ import urllib.parse
 DEFAULT_STYLE = "shell"
 REF_KINDS = ("env", "envfile", "file", "chain", "concat", "pipe")
 _VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_EXPORT_PREFIX_RE = re.compile(r"^export\s+")  # dotenv 行首 export 前缀
+_INLINE_COMMENT_RE = re.compile(r"\s+#.*$")    # 未加引号值的行内注释
 TRANSFORM_OPS = ("trim", "lower", "upper", "b64", "hex", "sha256", "sha512", "urlenc")
 # pipe secret 与 post 事件的外部命令统一超时（秒）
 _SUBPROC_TIMEOUT = 30
@@ -104,7 +106,7 @@ def parse_env_text(text: str) -> dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        line = re.sub(r"^export\s+", "", line)
+        line = _EXPORT_PREFIX_RE.sub("", line)
         key, sep, val = line.partition("=")
         if not sep:
             continue
@@ -120,7 +122,7 @@ def parse_env_text(text: str) -> dict[str, str]:
             val = inner
         else:
             # 未加引号的值剥离行内注释（# 前须有空白，避免误伤无空格的 #）
-            val = re.sub(r"\s+#.*$", "", val)
+            val = _INLINE_COMMENT_RE.sub("", val)
         pairs[key] = val
     return pairs
 
@@ -224,9 +226,13 @@ def _resolve_pipe(t: dict) -> tuple[str, None] | tuple[None, str]:
             return None, f"pipe input: {e}"
         stdin_text = v
     try:
+        # input 恒传字符串：None 会让子进程继承父进程 stdin（可能挂在 TTY
+        # 上）；显式 UTF-8 解码，输出不随运行环境 locale 漂移
         result = subprocess.run(
-            shlex.split(cmd), input=stdin_text or "", capture_output=True,
-            text=True, timeout=_SUBPROC_TIMEOUT, check=False,
+            shlex.split(cmd),
+            input=stdin_text if stdin_text is not None else "",
+            capture_output=True, encoding="utf-8",
+            timeout=_SUBPROC_TIMEOUT, check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         return None, f"pipe cmd failed: {e}"
@@ -261,7 +267,9 @@ def _resolve_table(t: dict) -> tuple[str, None] | tuple[None, str]:
         value, err = _resolve_concat(t["concat"])
     else:
         value, err = _resolve_pipe(t)
-    if value is None:
+    if value is None:  # 互斥不变式：值失败时 err 必非 None，守卫仅为类型收窄
+        if err is None:
+            return None, f"{kind}: resolve failed without error"
         return None, err
     if "transform" in t:
         return apply_transform(value, t["transform"])
@@ -399,8 +407,9 @@ def resolve_style(name: str, target: dict) -> tuple[str, str]:
 
 def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> tuple[str, str, list[str]]:
     """计算更新后的完整内容（不做任何写入，供 dry-run 复用）。
-    返回 (原内容, 新内容, 警告)。"""
-    original = path.read_text() if path.exists() else ""
+    返回 (原内容, 新内容, 警告)。现存文件按 UTF-8 读取，解码失败向上抛
+    （调用方转为该目标失败，与全文件的显式编码约定一致）。"""
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = original.splitlines()
     replaced: set[str] = set()
     dropped: list[str] = []
@@ -439,13 +448,13 @@ def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
 
 
 def write_env_file(path: pathlib.Path, content: str) -> None:
-    """以 0600 原子写入：先写同目录临时文件再 os.replace 替换。
+    """以 0600 原子写入（UTF-8）：先写同目录临时文件再 os.replace 替换。
 
     避免截断写入中途崩溃留下残缺的凭证文件；替换后的目标文件权限
     为 0600，也不存在“首次创建时短暂宽权限”的窗口。"""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
@@ -530,7 +539,8 @@ def _validate_manifest(data: dict) -> list[str]:
             errors.append(f"{prefix}: path must be a non-empty string, "
                           f"got {type(path).__name__}")
         style = target.get("style")
-        if isinstance(style, str) and style and style not in STYLES:
+        # 空串同样拒绝：静默回退 auto 推断违背 fail-closed
+        if isinstance(style, str) and style not in STYLES:
             errors.append(f"{prefix}.style: unknown style {style!r} "
                           f"(valid: {', '.join(STYLES)})")
         extra = set(target) - {"path", "style", "post", "vars"}
@@ -625,7 +635,7 @@ def _run_post(post: str | None, changed: bool, dry_run: bool) -> str | None:
     print(f"  {cyan('post:')} {post}")
     try:
         result = subprocess.run(
-            shlex.split(post), capture_output=True, text=True,
+            shlex.split(post), capture_output=True, encoding="utf-8",
             timeout=_SUBPROC_TIMEOUT, check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as e:
@@ -640,9 +650,39 @@ def _run_post(post: str | None, changed: bool, dry_run: bool) -> str | None:
     return None
 
 
+def _resolve_target_updates(target: dict, secrets: dict, style: str,
+                            seen_values: dict[str, str],
+                            ) -> tuple[dict[str, str], list[str], list[str]]:
+    """解析目标的全部 vars 引用 → (updates, errors, warns)。
+
+    清单预校验已保证 src 在 [secrets] 中有定义；运行期失败（env 未设、
+    文件缺失、pipe 出错等）与 style 值校验问题都记入 errors，调用方须在
+    errors 非空时放弃整个目标（fail-closed，绝不写入残缺值）。同一 secret
+    被多处引用而两次解析结果不同（非确定性 pipe？）记入 warns。"""
+    updates: dict[str, str] = {}
+    errors: list[str] = []
+    warns: list[str] = []
+    for var, src in target.get("vars", {}).items():
+        value, err = resolve_secret(secrets[src])
+        if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
+            errors.append(f"secret {src!r} unresolved: {err}")
+            continue
+        if src not in seen_values:
+            seen_values[src] = value
+        elif seen_values[src] != value:
+            warns.append(f"secret {src!r} resolved differently this run "
+                         "(non-deterministic pipe?); such targets never "
+                         "converge and post would fire on every run")
+        errs, ws = validate_value(style, var, value)
+        errors.extend(errs)
+        warns.extend(ws)
+        updates[var] = value
+    return updates, errors, warns
+
+
 def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
                     seen_values: dict[str, str]) -> tuple[str | None, list[str]]:
-    """处理单个目标：解析 style 与全部 secrets → 校验值 → 渲染并增量写入
+    """处理单个目标：解析 style → 解析全部 vars 并校验值 → 渲染并增量写入
     .env → 按需触发 post。返回 (结果状态, 失败消息列表)：状态为
     "updated" / "unchanged" / "would update"，目标失败时为 None。
 
@@ -665,25 +705,8 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
         return None, [str(e)]
     print(bold(name) + dim(f" ({style}, {style_src})"))
 
-    updates: dict[str, str] = {}
-    errors: list[str] = []
-    warns: list[str] = []
-    for var, src in target.get("vars", {}).items():
-        # 清单预校验已保证 src 在 [secrets] 中有定义；先解析引用，再做 style 校验
-        value, err = resolve_secret(secrets[src])
-        if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
-            errors.append(f"secret {src!r} unresolved: {err}")
-            continue
-        if src not in seen_values:
-            seen_values[src] = value
-        elif seen_values[src] != value:
-            print(f"  {yellow('warn:')} secret {src!r} resolved differently this run "
-                  "(non-deterministic pipe?); such targets never converge and "
-                  "post would fire on every run", file=sys.stderr)
-        errs, ws = validate_value(style, var, value)
-        errors.extend(errs)
-        warns.extend(ws)
-        updates[var] = value
+    updates, errors, warns = _resolve_target_updates(
+        target, secrets, style, seen_values)
 
     if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
         for e in errors:
@@ -701,10 +724,10 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
             elif path.exists():
                 path.chmod(0o600)  # 内容未变也确保权限为 0600
             state = "updated" if changed else "unchanged"
-    except OSError as e:
-        # 目标不可读/被目录占用/写替换失败（权限、磁盘满）等 IO 错误转为
-        # 目标失败计入汇总；write_env_file 是原子替换，失败时原文件保持
-        # 完整，post 不会在残缺状态上触发
+    except (OSError, UnicodeDecodeError) as e:
+        # 目标不可读/是目录/写替换失败（权限、磁盘满）/现存文件非 UTF-8：
+        # 统一转为目标失败计入汇总；write_env_file 是原子替换，失败时原
+        # 文件保持完整，post 不会在残缺状态上触发
         msg = f"io error on {path}: {e}"
         print(f"  {red('error:')} {msg}", file=sys.stderr)
         return None, [msg]
@@ -726,10 +749,15 @@ def _dispatch(args: argparse.Namespace) -> None:
     写入残缺值）；存在失败时以退出码 1 结束。"""
     master = find_manifest(args.config)
 
-    mode = master.stat().st_mode & 0o777
-    if mode & 0o077:
-        print(f"{yellow('warning:')} {master} is too permissive ({oct(mode)}); "
-              "it may contain secret references — chmod 600 recommended", file=sys.stderr)
+    try:
+        mode = master.stat().st_mode & 0o777
+    except OSError:
+        pass  # 找到后又被移除等竞态：跳过权限检查，load_manifest 会统一报告
+    else:
+        if mode & 0o077:
+            print(f"{yellow('warning:')} {master} is too permissive ({oct(mode)}); "
+                  "it may contain secret references — chmod 600 recommended",
+                  file=sys.stderr)
 
     try:
         data = load_manifest(master)
