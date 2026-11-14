@@ -362,9 +362,8 @@ def validate_value(style: str, key: str, value: str) -> tuple[list[str], list[st
             warns.append(f"{key}: docker run keeps quotes literal while compose strips them; verify the consumer")
         if re.search(r"(?<!\S)#", value):
             warns.append(f"{key}: a standalone '#' in the value starts an inline comment under compose")
-    elif style == "systemd":
-        if "\n" in value or "\r" in value:
-            errors.append(f"{key}: systemd EnvironmentFile does not support multi-line values")
+    elif style == "systemd" and ("\n" in value or "\r" in value):
+        errors.append(f"{key}: systemd EnvironmentFile does not support multi-line values")
     return errors, warns
 
 
