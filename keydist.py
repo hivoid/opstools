@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
+keydist — 增量分发 secrets 到各消费端配置文件（.env / JSON / 整文件），
+并执行 post 事件。
 
 - TOML 仅作清单。secret 值由类型天然区分：裸字符串/数字 = 字面量
   （布尔渲染为 true/false）；表 = 引用。结构化写法不存在可拼错的 scheme
@@ -17,7 +18,14 @@ keydist — 增量更新各消费端的 .env 文件，并执行 post 事件。
                                           下同样执行）
   任意引用表可加 transform = [op, ...]（闭集，按序应用）：
     trim / lower / upper / b64 / hex / sha256 / sha512 / urlenc
-- 按 style 类别适配各消费端 .env 格式：shell / dotenv / systemd / docker
+- 目标 format 决定写入形态（env / json / raw）：
+    env（默认）  按 style 类别适配各消费端 .env 格式：shell / dotenv /
+                systemd / docker
+    json        键值合并进顶层 JSON object：现存文件必须是合法 object，
+                否则该目标失败；幂等比较基于解析后相等（仅排版不同不算
+                变化，不触发 post）；值恒写为 JSON 字符串
+    raw         单个 secret 即整个文件内容，须显式 format = "raw"；值
+                原样写出（UTF-8）、不追加换行
 - 仅在文件内容实际变化时触发 post 事件
 - 每次运行确保目标文件权限为 600
 - 清单查找顺序：--config/-c 显式路径 > $XDG_CONFIG_HOME/keydist/keydist.toml
@@ -32,6 +40,7 @@ import argparse
 import base64
 import difflib
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -42,7 +51,9 @@ import tempfile
 import tomllib
 import urllib.parse
 
+DEFAULT_FORMAT = "env"
 DEFAULT_STYLE = "shell"
+FORMATS = ("env", "json", "raw")
 REF_KINDS = ("env", "envfile", "file", "chain", "concat", "pipe")
 _VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _EXPORT_PREFIX_RE = re.compile(r"^export\s+")  # dotenv 行首 export 前缀
@@ -375,7 +386,7 @@ def format_env_line(key: str, value: str, style: str, prefix: str = "") -> str:
     return f"{prefix}{key}={st['quote'](value)}"
 
 # ---------------------------------------------------------------------------
-# style 解析（保持上一版设计：explicit > auto > default）
+# format / style 解析（explicit > auto > default）
 # ---------------------------------------------------------------------------
 
 _STYLE_HINTS: list[tuple[str, str]] = [
@@ -400,8 +411,29 @@ def resolve_style(name: str, target: dict) -> tuple[str, str]:
             return style, "auto"
     return DEFAULT_STYLE, "default"
 
+
+def infer_format(path_str: str) -> str:
+    """按路径后缀推断 format：.json → json，其余一律 env——只认强信号。
+    raw 无稳定路径特征，永不推断，必须显式 format = "raw"。"""
+    return "json" if path_str.endswith(".json") else DEFAULT_FORMAT
+
+
+def resolve_format(target: dict) -> tuple[str, str]:
+    """确定目标 format：显式 format > 路径后缀推断 > 默认 env。
+    返回 (format, 来源)，来源为 "explicit" / "auto" / "default"；
+    显式指定了未知 format 时抛 ValueError（与 resolve_style 同款纵深防御，
+    清单预校验正常已在更早处拦截）。"""
+    explicit = target.get("format")
+    if explicit:
+        if explicit not in FORMATS:
+            raise ValueError(f"unknown format {explicit!r} (valid: {', '.join(FORMATS)})")
+        return explicit, "explicit"
+    if infer_format(str(target.get("path", ""))) == "json":
+        return "json", "auto"
+    return DEFAULT_FORMAT, "default"
+
 # ---------------------------------------------------------------------------
-# .env 增量更新（保持上一版设计，含重复键清理）
+# 目标文件渲染：env 增量更新（保持上一版设计，含重复键清理）/ json / raw
 # ---------------------------------------------------------------------------
 
 def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> tuple[str, str, list[str]]:
@@ -446,8 +478,55 @@ def render_env_file(path: pathlib.Path, updates: dict[str, str], style: str) -> 
     return original, new_content, warns
 
 
-def write_env_file(path: pathlib.Path, content: str) -> None:
-    """以 0600 原子写入（UTF-8）：先写同目录临时文件再 os.replace 替换。
+class TargetDataError(Exception):
+    """目标现存文件内容不合法（如非法 JSON、顶层非 object）：该目标整体
+    失败、不写入。env 渲染可逐行容忍垃圾内容，json 不行——fail-closed 下
+    唯一安全的动作就是不写。"""
+
+
+def render_json_file(path: pathlib.Path,
+                     updates: dict[str, str]) -> tuple[str, str, bool, list[str]]:
+    """计算 JSON 目标更新后的完整内容（不做任何写入，供 dry-run 复用）。
+    返回 (原内容, 新内容, 是否变化, 警告)。
+
+    - 现存文件必须是合法 JSON object，否则抛 TargetDataError（整目标失败）
+    - 是否变化基于解析后相等而非文本：仅排版不同（缩进/紧凑）不算变化，
+      不重写、不触发 post——否则一次格式归一化会让 post 永远触发，与
+      非确定性 pipe 同款的不收敛病
+    - 值恒写为 JSON 字符串（工具的值模型是 str，非字符串原值被同名键
+      覆盖）；顶层只合并一层键，不支持嵌套路径
+    - dict 保序：已存在的键留在原位，新键追加在末尾，与 env 渲染器一致
+    """
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    if original.strip():
+        try:
+            doc = json.loads(original)
+        except json.JSONDecodeError as e:
+            raise TargetDataError(f"{path}: not valid JSON: {e}") from e
+        if not isinstance(doc, dict):
+            raise TargetDataError(f"{path}: top-level JSON value must be "
+                                  f"an object, got {type(doc).__name__}")
+    else:
+        doc = {}
+    new_doc = {**doc, **updates}
+    changed = new_doc != doc
+    new_content = json.dumps(new_doc, indent=2, ensure_ascii=False) + "\n"
+    return original, new_content, changed, []
+
+
+def render_raw_file(path: pathlib.Path,
+                    value: str) -> tuple[str, str, bool, list[str]]:
+    """计算 raw 目标更新后的完整内容（不做任何写入，供 dry-run 复用）：
+    值即整个文件内容，逐字原样写出、不追加换行（需要尾随换行时由清单用
+    concat 显式拼）。值模型是 str，以 UTF-8 写出——与工具整体的显式编码
+    约定一致，不支持二进制。返回 (原内容, 新内容, 是否变化, 警告)。"""
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    return original, value, value != original, []
+
+
+def write_target_file(path: pathlib.Path, content: str) -> None:
+    """以 0600 原子写入目标文件（UTF-8，适用于全部 format 的最终落盘）：
+    先写同目录临时文件再 os.replace 替换。
 
     避免截断写入中途崩溃留下残缺的凭证文件；替换后的目标文件权限
     为 0600，也不存在“首次创建时短暂宽权限”的窗口。"""
@@ -527,7 +606,7 @@ def _validate_manifest(data: dict) -> list[str]:
         if not isinstance(target, dict):
             errors.append(f"{prefix} must be a table, got {type(target).__name__}")
             continue
-        for field in ("style", "post"):
+        for field in ("format", "style", "post", "secret"):
             if field in target and not isinstance(target[field], str):
                 errors.append(f"{prefix}.{field} must be a string, "
                               f"got {type(target[field]).__name__}")
@@ -537,21 +616,48 @@ def _validate_manifest(data: dict) -> list[str]:
         elif not isinstance(path, str) or not path:
             errors.append(f"{prefix}: path must be a non-empty string, "
                           f"got {type(path).__name__}")
+        fmt = target.get("format")
+        if isinstance(fmt, str) and fmt not in FORMATS:
+            errors.append(f"{prefix}.format: unknown format {fmt!r} "
+                          f"(valid: {', '.join(FORMATS)})")
         style = target.get("style")
         # 空串同样拒绝：静默回退 auto 推断违背 fail-closed
         if isinstance(style, str) and style not in STYLES:
             errors.append(f"{prefix}.style: unknown style {style!r} "
                           f"(valid: {', '.join(STYLES)})")
-        extra = set(target) - {"path", "style", "post", "vars"}
+        # 交叉字段按生效 format（显式 > 后缀推断）校验；显式 format 非法时
+        # 按推断继续，让其余字段的错误仍一次报全（与整体报告语义一致）
+        eff = fmt if fmt in FORMATS else infer_format(
+            path if isinstance(path, str) else "")
+        if eff != "env" and "style" in target:
+            errors.append(f"{prefix}: style only applies to format env, "
+                          f"not {eff!r}")
+        if eff == "raw":
+            if "vars" in target:
+                errors.append(f"{prefix}: raw takes 'secret', not 'vars'")
+            if "secret" not in target:
+                errors.append(f"{prefix}: raw requires 'secret'")
+        elif "secret" in target:
+            errors.append(f"{prefix}: 'secret' only applies to format raw, "
+                          f"not {eff!r}")
+        extra = set(target) - {"path", "format", "style", "post", "vars", "secret"}
         if extra:
             errors.append(f"{prefix}: unknown key(s): " + ", ".join(sorted(extra)))
+        if eff == "raw":
+            secret = target.get("secret")
+            if isinstance(secret, str) and secret not in secrets:
+                errors.append(f"{prefix}.secret: secret {secret!r} "
+                              "not defined in [secrets]")
+            continue  # raw 无 vars；后续 vars 校验不适用
         vars_ = target.get("vars", {})
         if not isinstance(vars_, dict):
             errors.append(f"{prefix}.vars must be a table, "
                           f"got {type(vars_).__name__}")
             continue
         for var, src in vars_.items():
-            if not isinstance(var, str) or not _VAR_NAME_RE.fullmatch(var):
+            # env 键名受环境变量命名约束；json 键是任意 JSON 字符串，不检查
+            if eff == "env" and (not isinstance(var, str)
+                                 or not _VAR_NAME_RE.fullmatch(var)):
                 errors.append(f"{prefix}.vars: invalid env var name {var!r}")
             if not isinstance(src, str):
                 errors.append(f"{prefix}.vars.{var}: secret name must be a "
@@ -589,7 +695,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数：-c/--config 指定清单路径，-n/--dry-run 只预览变更。"""
     p = argparse.ArgumentParser(
         prog="keydist",
-        description="把清单里的 secrets 增量分发到各消费端 .env 文件。",
+        description="把清单里的 secrets 增量分发到各消费端配置文件"
+                    "（.env / JSON / 整文件）。",
     )
     p.add_argument("-c", "--config", metavar="PATH",
                    help="清单文件路径（默认按查找顺序取第一个存在的）")
@@ -649,15 +756,16 @@ def _run_post(post: str | None, changed: bool, dry_run: bool) -> str | None:
     return None
 
 
-def _resolve_target_updates(target: dict, secrets: dict, style: str,
+def _resolve_target_updates(target: dict, secrets: dict, style: str | None,
                             seen_values: dict[str, str],
                             ) -> tuple[dict[str, str], list[str], list[str]]:
     """解析目标的全部 vars 引用 → (updates, errors, warns)。
 
     清单预校验已保证 src 在 [secrets] 中有定义；运行期失败（env 未设、
     文件缺失、pipe 出错等）与 style 值校验问题都记入 errors，调用方须在
-    errors 非空时放弃整个目标（fail-closed，绝不写入残缺值）。同一 secret
-    被多处引用而两次解析结果不同（非确定性 pipe？）记入 warns。"""
+    errors 非空时放弃整个目标（fail-closed，绝不写入残缺值）。style 为
+    None（env 之外的 format，如 json，没有引号方言）时跳过值校验。同一
+    secret 被多处引用而两次解析结果不同（非确定性 pipe？）记入 warns。"""
     updates: dict[str, str] = {}
     errors: list[str] = []
     warns: list[str] = []
@@ -672,23 +780,27 @@ def _resolve_target_updates(target: dict, secrets: dict, style: str,
             warns.append(f"secret {src!r} resolved differently this run "
                          "(non-deterministic pipe?); such targets never "
                          "converge and post would fire on every run")
-        errs, ws = validate_value(style, var, value)
-        errors.extend(errs)
-        warns.extend(ws)
+        if style is not None:  # 值校验是 env style 专属（引号/换行语义）
+            errs, ws = validate_value(style, var, value)
+            errors.extend(errs)
+            warns.extend(ws)
         updates[var] = value
     return updates, errors, warns
 
 
 def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
                     seen_values: dict[str, str]) -> tuple[str | None, list[str]]:
-    """处理单个目标：解析 style → 解析全部 vars 并校验值 → 渲染并增量写入
-    .env → 按需触发 post。返回 (结果状态, 失败消息列表)：状态为
-    "updated" / "unchanged" / "would update"，目标失败时为 None。
+    """处理单个目标：解析 format（env 再解析 style）→ 解析全部 vars
+    （raw 则解析单个 secret）并校验值 → 按 format 渲染写入 → 按需触发
+    post。返回 (结果状态, 失败消息列表)：状态为 "updated" / "unchanged" /
+    "would update"，目标失败时为 None。
 
-    清单预校验已保证 path 非空、style 合法、vars 引用的 secret 有定义；
-    运行期仍可能失败的是 secret 解析（env 未设、文件缺失、pipe 出错等）、
-    值校验（如 docker 不支持多行值）与目标文件 IO（父目录创建失败、目标
-    不可读或被目录占用、写替换失败）——IO 错误同样转为目标失败而非 traceback。"""
+    清单预校验已保证 path 非空、format/style 合法、vars/secret 引用的
+    secret 有定义；运行期仍可能失败的是 secret 解析（env 未设、文件缺失、
+    pipe 出错等）、值校验（仅 env style，如 docker 不支持多行值）、现存
+    文件内容不合法（json，TargetDataError）与目标文件 IO（父目录创建
+    失败、目标不可读或被目录占用、写替换失败）——一律转为目标失败而非
+    traceback。"""
     path = pathlib.Path(os.path.expanduser(target["path"]))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -698,14 +810,41 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
         return None, [msg]
 
     try:
-        style, style_src = resolve_style(name, target)
+        fmt, fmt_src = resolve_format(target)
     except ValueError as e:
         print(f"{red('error:')} {bold(name)}: {e}", file=sys.stderr)
         return None, [str(e)]
-    print(bold(name) + dim(f" ({style}, {style_src})"))
+    style: str | None = None
+    if fmt == "env":
+        try:
+            style, style_src = resolve_style(name, target)
+        except ValueError as e:
+            print(f"{red('error:')} {bold(name)}: {e}", file=sys.stderr)
+            return None, [str(e)]
+        print(bold(name) + dim(f" ({style}, {style_src})"))
+    else:
+        print(bold(name) + dim(f" ({fmt}, {fmt_src})"))
 
-    updates, errors, warns = _resolve_target_updates(
-        target, secrets, style, seen_values)
+    errors: list[str] = []
+    warns: list[str] = []
+    updates: dict[str, str] = {}
+    raw_value: str | None = None
+    if fmt == "raw":
+        src = target["secret"]
+        value, err = resolve_secret(secrets[src])
+        if value is None:  # 互斥不变式：值为 None 即失败，此时 err 必有信息
+            errors.append(f"secret {src!r} unresolved: {err}")
+        else:
+            if src not in seen_values:
+                seen_values[src] = value
+            elif seen_values[src] != value:
+                warns.append(f"secret {src!r} resolved differently this run "
+                             "(non-deterministic pipe?); such targets never "
+                             "converge and post would fire on every run")
+            raw_value = value
+    else:
+        updates, errors, warns = _resolve_target_updates(
+            target, secrets, style, seen_values)
 
     if errors:  # fail-closed：任一 secret 出错即放弃整个目标，绝不写入残缺值
         for e in errors:
@@ -713,20 +852,35 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
         return None, errors
 
     try:
-        original, new_content, render_warns = render_env_file(path, updates, style)
-        changed = new_content != original
+        if fmt == "json":
+            original, new_content, changed, render_warns = render_json_file(path, updates)
+        elif fmt == "raw":
+            # errors 为空保证 raw_value 已成功解析；断言仅为类型收窄
+            assert raw_value is not None
+            original, new_content, changed, render_warns = render_raw_file(path, raw_value)
+        else:
+            # fmt == "env" 时 style 必已解析成功；断言仅为类型收窄
+            assert style is not None
+            original, new_content, render_warns = render_env_file(path, updates, style)
+            changed = new_content != original
         if dry_run:
             state = "would update" if changed else "unchanged"
         else:
             if changed:
-                write_env_file(path, new_content)
+                write_target_file(path, new_content)
             elif path.exists():
                 path.chmod(0o600)  # 内容未变也确保权限为 0600
             state = "updated" if changed else "unchanged"
+    except TargetDataError as e:
+        # 现存目标文件内容不合法（非法 JSON / 顶层非 object）：不写入，
+        # 整目标失败——env 可逐行容忍垃圾内容，json 不能
+        msg = str(e)
+        print(f"  {red('error:')} {msg}", file=sys.stderr)
+        return None, [msg]
     except (OSError, UnicodeDecodeError) as e:
         # 目标不可读/是目录/写替换失败（权限、磁盘满）/现存文件非 UTF-8：
-        # 统一转为目标失败计入汇总；write_env_file 是原子替换，失败时原
-        # 文件保持完整，post 不会在残缺状态上触发
+        # 统一转为目标失败计入汇总；write_target_file 是原子替换，失败时
+        # 原文件保持完整，post 不会在残缺状态上触发
         msg = f"io error on {path}: {e}"
         print(f"  {red('error:')} {msg}", file=sys.stderr)
         return None, [msg]
@@ -743,9 +897,9 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
 
 def _dispatch(args: argparse.Namespace) -> None:
     """加载并整体校验清单（读失败/语法/结构问题先于一切目标报告）→ 逐目标
-    分发到 _process_target（style 解析、secret 解析与校验、增量写入、post
-    事件）→ 汇总结果。任一 secret 失败即放弃整个目标（fail-closed，绝不
-    写入残缺值）；存在失败时以退出码 1 结束。"""
+    分发到 _process_target（format/style 解析、secret 解析与校验、按 format
+    渲染写入、post 事件）→ 汇总结果。任一 secret 失败即放弃整个目标
+    （fail-closed，绝不写入残缺值）；存在失败时以退出码 1 结束。"""
     master = find_manifest(args.config)
 
     try:

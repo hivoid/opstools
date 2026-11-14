@@ -6,14 +6,17 @@
 - secret 引用：env / envfile / file / chain / concat / pipe 与字面量
 - transform 闭集与 fail-closed 报错
 - 各 style 的引号、校验（错误 vs 警告）与行格式化
-- style 解析优先级（explicit > auto > default）
+- format 解析优先级（explicit > auto > default）与 render_json_file /
+  render_raw_file 渲染语义
 - render_env_file 增量更新（替换、追加、重复键清理、前缀保留）
-- write_env_file 权限、diff_text、find_manifest、parse_args
+- write_target_file 权限、diff_text、find_manifest、parse_args
 - load_manifest：读取失败 / TOML 语法 / 结构类型错误在运行前统一报告
-- main() 端到端：dry-run、post 触发/跳过、fail-closed 与退出码
+- main() 端到端：dry-run、post 触发/跳过、fail-closed 与退出码，
+  覆盖 env / json / raw 三种 format
 """
 
 import io
+import json
 import os
 import pathlib
 import sys
@@ -649,6 +652,41 @@ class ResolveStyleTests(unittest.TestCase):
         self.assertEqual(keydist.resolve_style("docker-systemd-thing", {}),
                          ("systemd", "auto"))
 
+
+# ---------------------------------------------------------------------------
+# format 解析
+# ---------------------------------------------------------------------------
+
+class ResolveFormatTests(unittest.TestCase):
+    """resolve_format：显式 > 路径后缀推断（.json）> 默认 env；raw 永不推断。"""
+
+    def test_explicit_format(self):
+        self.assertEqual(keydist.resolve_format({"format": "raw"}),
+                         ("raw", "explicit"))
+
+    def test_explicit_unknown_format_raises(self):
+        with self.assertRaises(ValueError):
+            keydist.resolve_format({"format": "yaml"})
+
+    def test_empty_explicit_format_falls_through(self):
+        self.assertEqual(
+            keydist.resolve_format({"format": "", "path": "x.json"}),
+            ("json", "auto"))
+
+    def test_auto_json_by_suffix(self):
+        self.assertEqual(
+            keydist.resolve_format({"path": "/etc/app/config.json"}),
+            ("json", "auto"))
+
+    def test_default_env_when_no_hint(self):
+        self.assertEqual(keydist.resolve_format({"path": "/etc/app/.env"}),
+                         ("env", "default"))
+
+    def test_raw_never_inferred(self):
+        # token/license 类路径无稳定特征：必须显式 format = "raw"
+        self.assertEqual(keydist.resolve_format({"path": "/etc/myapp/token"}),
+                         ("env", "default"))
+
 # ---------------------------------------------------------------------------
 # env 渲染与写入
 # ---------------------------------------------------------------------------
@@ -729,12 +767,12 @@ class RenderEnvFileTests(TempDirBase):
         self.assertEqual(warns, [])
 
 
-class WriteEnvFileTests(TempDirBase):
-    """write_env_file：0600 创建/截断写入。"""
+class WriteTargetFileTests(TempDirBase):
+    """write_target_file：0600 创建/截断写入。"""
 
     def test_creates_with_0600(self):
         p = self.tmp / "new.env"
-        keydist.write_env_file(p, "A=1\n")
+        keydist.write_target_file(p, "A=1\n")
         self.assertTrue(p.exists())
         self.assertEqual(p.stat().st_mode & 0o777, 0o600)
         self.assertEqual(p.read_text(), "A=1\n")
@@ -743,15 +781,132 @@ class WriteEnvFileTests(TempDirBase):
         p = self.tmp / "a.env"
         p.write_text("OLD\n")
         p.chmod(0o644)
-        keydist.write_env_file(p, "A=1\n")
+        keydist.write_target_file(p, "A=1\n")
         self.assertEqual(p.read_text(), "A=1\n")
         self.assertEqual(p.stat().st_mode & 0o777, 0o600)
 
     def test_truncates_longer_previous_content(self):
         p = self.tmp / "a.env"
         p.write_text("x" * 1000)
-        keydist.write_env_file(p, "short")
+        keydist.write_target_file(p, "short")
         self.assertEqual(p.read_text(), "short")
+
+
+# ---------------------------------------------------------------------------
+# json / raw 渲染
+# ---------------------------------------------------------------------------
+
+class RenderJsonFileTests(TempDirBase):
+    """render_json_file：合并语义、幂等比较基于解析后相等、fail-closed。"""
+
+    def test_new_file(self):
+        original, new, changed, warns = keydist.render_json_file(
+            self.tmp / "new.json", {"api-key": "v1"})
+        self.assertEqual(original, "")
+        self.assertEqual(new, '{\n  "api-key": "v1"\n}\n')
+        self.assertTrue(changed)
+        self.assertEqual(warns, [])
+
+    def test_replaces_existing_and_keeps_others(self):
+        p = self.tmp / "c.json"
+        p.write_text('{"keep": 1, "api-key": "old"}')
+        _, new, changed, _ = keydist.render_json_file(p, {"api-key": "new"})
+        self.assertTrue(changed)
+        doc = json.loads(new)
+        self.assertEqual(doc, {"keep": 1, "api-key": "new"})
+        # 被替换的键保持在原位（dict 保序），其余键值类型不受影响
+        self.assertEqual(list(doc), ["keep", "api-key"])
+        self.assertEqual(doc["keep"], 1)
+
+    def test_new_key_appended_at_end(self):
+        p = self.tmp / "c.json"
+        p.write_text('{"a": "1"}\n')
+        _, new, _, _ = keydist.render_json_file(p, {"b": "2"})
+        self.assertEqual(list(json.loads(new)), ["a", "b"])
+
+    def test_semantic_unchanged_when_only_formatting_differs(self):
+        # 紧凑排版但值相同：不算变化（避免重排版让 post 永远触发）
+        p = self.tmp / "c.json"
+        original = '{"api-key":"v"}'
+        p.write_text(original)
+        _, new, changed, _ = keydist.render_json_file(p, {"api-key": "v"})
+        self.assertFalse(changed)
+        self.assertNotEqual(new, original)  # new 恒为归一化排版，由调用方决定是否落盘
+
+    def test_no_updates_is_unchanged(self):
+        p = self.tmp / "c.json"
+        p.write_text('{"a": 1}\n')
+        _, _, changed, _ = keydist.render_json_file(p, {})
+        self.assertFalse(changed)
+
+    def test_missing_file_renders_empty_object(self):
+        _, new, changed, _ = keydist.render_json_file(self.tmp / "n.json", {})
+        self.assertEqual(new, "{}\n")
+        self.assertFalse(changed)
+
+    def test_malformed_existing_json_raises(self):
+        p = self.tmp / "c.json"
+        p.write_text('{"a": ')
+        with self.assertRaises(keydist.TargetDataError):
+            keydist.render_json_file(p, {"a": "1"})
+
+    def test_non_object_root_raises(self):
+        p = self.tmp / "c.json"
+        p.write_text("[1, 2]\n")
+        with self.assertRaises(keydist.TargetDataError) as cm:
+            keydist.render_json_file(p, {"a": "1"})
+        self.assertIn("object", str(cm.exception))
+
+    def test_values_always_json_strings(self):
+        # 值模型是 str：非字符串原值会被同名键的字符串覆盖
+        p = self.tmp / "c.json"
+        p.write_text('{"n": 1}')
+        _, new, changed, _ = keydist.render_json_file(p, {"n": "1"})
+        self.assertTrue(changed)
+        self.assertEqual(json.loads(new), {"n": "1"})
+
+    def test_unicode_and_newline_values(self):
+        _, new, _, _ = keydist.render_json_file(
+            self.tmp / "u.json", {"k": "值\n两行"})
+        self.assertEqual(json.loads(new), {"k": "值\n两行"})
+        self.assertIn("值", new)  # ensure_ascii=False，非 ASCII 保持字面
+
+
+class RenderRawFileTests(TempDirBase):
+    """render_raw_file：值即整个文件内容，原样写出、不追加换行。"""
+
+    def test_new_file(self):
+        original, new, changed, warns = keydist.render_raw_file(
+            self.tmp / "token", "tok-123")
+        self.assertEqual(original, "")
+        self.assertEqual(new, "tok-123")
+        self.assertTrue(changed)
+        self.assertEqual(warns, [])
+
+    def test_replaces_entire_content(self):
+        p = self.tmp / "token"
+        p.write_text("old-token\ntrailing junk\n")
+        _, new, changed, _ = keydist.render_raw_file(p, "new-token")
+        self.assertEqual(new, "new-token")
+        self.assertTrue(changed)
+
+    def test_no_trailing_newline_added(self):
+        # 现存文件带尾随换行而值没有：如实报告变化，换行被移除
+        p = self.tmp / "token"
+        p.write_text("tok\n")
+        _, new, changed, _ = keydist.render_raw_file(p, "tok")
+        self.assertEqual(new, "tok")
+        self.assertTrue(changed)
+
+    def test_unchanged(self):
+        p = self.tmp / "token"
+        p.write_text("tok")
+        _, _, changed, _ = keydist.render_raw_file(p, "tok")
+        self.assertFalse(changed)
+
+    def test_multiline_value(self):
+        _, new, _, _ = keydist.render_raw_file(self.tmp / "k", "a\nb\n")
+        self.assertEqual(new, "a\nb\n")
 
 # ---------------------------------------------------------------------------
 # diff
@@ -984,6 +1139,82 @@ class LoadManifestTests(TempDirBase):
         self.assertIn("missing required key 'path'", msg)
         self.assertIn("unknown style 'ini'", msg)
         self.assertIn("secret 'nope' not defined", msg)
+
+
+class ManifestFormatValidationTests(TempDirBase):
+    """format 相关清单校验：未知 format、style/secret/vars 与 format 的
+    交叉约束、json 键名不受环境变量命名约束。"""
+
+    def expect_problems(self, body: str, *fragments: str):
+        p = self.tmp / "m.toml"
+        p.write_text(body)
+        with self.assertRaises(keydist.ManifestError) as cm:
+            keydist.load_manifest(p)
+        for frag in fragments:
+            self.assertIn(frag, str(cm.exception))
+
+    def test_unknown_format(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/y.env"\n'
+            'format = "yaml"\n\n[targets.t.vars]\nK = "a"\n',
+            "unknown format 'yaml'")
+
+    def test_style_rejected_for_explicit_json(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/c.json"\n'
+            'format = "json"\nstyle = "shell"\n\n[targets.t.vars]\nK = "a"\n',
+            "style only applies to format env")
+
+    def test_style_rejected_for_inferred_json(self):
+        # 未显式写 format：后缀推断为 json，同样拒绝 style
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/c.json"\n'
+            'style = "shell"\n\n[targets.t.vars]\nK = "a"\n',
+            "style only applies to format env")
+
+    def test_raw_requires_secret(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/token"\n'
+            'format = "raw"\n',
+            "raw requires 'secret'")
+
+    def test_raw_rejects_vars(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/token"\n'
+            'format = "raw"\nsecret = "a"\n\n[targets.t.vars]\nK = "a"\n',
+            "raw takes 'secret', not 'vars'")
+
+    def test_secret_rejected_for_non_raw(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/c.json"\n'
+            'secret = "a"\n',
+            "'secret' only applies to format raw")
+
+    def test_raw_secret_must_be_defined(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/token"\n'
+            'format = "raw"\nsecret = "nope"\n',
+            "not defined in [secrets]")
+
+    def test_json_vars_keys_free_of_env_naming(self):
+        # json 键不受环境变量命名约束（连字符、点号合法）
+        p = self.tmp / "m.toml"
+        p.write_text('[secrets]\na = "v"\n\n[targets.t]\npath = "/x/c.json"\n'
+                     '\n[targets.t.vars]\n"api-key.name" = "a"\n')
+        data = keydist.load_manifest(p)
+        self.assertEqual(data["targets"]["t"]["vars"], {"api-key.name": "a"})
+
+    def test_env_vars_still_require_env_names(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/.env"\n'
+            '\n[targets.t.vars]\n"bad-name" = "a"\n',
+            "invalid env var name")
+
+    def test_non_string_format_rejected(self):
+        self.expect_problems(
+            '[secrets]\na = "v"\n\n[targets.t]\npath = "/x/y.env"\n'
+            "format = 1\n",
+            "format must be a string")
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -1384,6 +1615,134 @@ class MainManifestValidationTests(MainTestBase):
         self.assertIn("unknown style 'ini'", err)
         self.assertIn("targets.b", err)
         self.assertFalse(self.env_path.exists())
+
+
+class MainFormatTests(MainTestBase):
+    """json / raw format 的 main() 端到端：写入、语义幂等、fail-closed
+    与 post 触发。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.json_path = self.tmp / "out" / "config.json"
+        self.raw_path = self.tmp / "out" / "token"
+
+    def write_json_target_manifest(self) -> None:
+        self.write_manifest(
+            '[secrets]\nalpha = "secret-value"\n\n'
+            "[targets.cfg]\n"
+            f"path = {str(self.json_path)!r}\n"
+            f'post = "touch {self.post_marker}"\n'
+            "\n[targets.cfg.vars]\n"
+            '"api-key" = "alpha"\n'
+        )
+
+    def test_json_target_written_and_idempotent(self):
+        self.write_json_target_manifest()
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(self.json_path.read_text()),
+                         {"api-key": "secret-value"})
+        self.assertEqual(self.json_path.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(self.post_marker.exists())
+        self.assertIn("(json, auto)", out)
+        # 第二次运行：值相同 → unchanged，post 跳过
+        self.post_marker.unlink()
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertIn("unchanged", out)
+        self.assertFalse(self.post_marker.exists())
+
+    def test_json_compact_file_same_values_not_rewritten(self):
+        # 紧凑排版但值一致：不重写（字节不变）、不触发 post——幂等比较
+        # 基于解析后相等
+        self.json_path.parent.mkdir(parents=True)
+        self.json_path.write_text('{"api-key":"secret-value"}')
+        self.write_json_target_manifest()
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.json_path.read_text(), '{"api-key":"secret-value"}')
+        self.assertIn("unchanged", out)
+        self.assertFalse(self.post_marker.exists())
+
+    def test_json_malformed_existing_fails_without_write(self):
+        self.json_path.parent.mkdir(parents=True)
+        self.json_path.write_text("{oops")
+        self.write_json_target_manifest()
+        code, out, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.json_path.read_text(), "{oops")  # 原文件未动
+        self.assertFalse(self.post_marker.exists())
+
+    def test_json_dry_run_previews_diff_without_write(self):
+        self.write_json_target_manifest()
+        code, out, err = self.run_main("-n")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self.json_path.exists())
+        self.assertIn("would update", out)
+        self.assertIn('"api-key": "secret-value"', out)
+        self.assertIn("would run:", out)
+
+    def test_raw_target_written_verbatim(self):
+        self.write_manifest(
+            '[secrets]\nalpha = "secret-value"\n\n'
+            "[targets.tok]\n"
+            f"path = {str(self.raw_path)!r}\n"
+            'format = "raw"\n'
+            'secret = "alpha"\n'
+            f'post = "touch {self.post_marker}"\n'
+        )
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.raw_path.read_text(), "secret-value")  # 无尾随换行
+        self.assertEqual(self.raw_path.stat().st_mode & 0o777, 0o600)
+        self.assertIn("(raw, explicit)", out)
+        self.assertTrue(self.post_marker.exists())
+        # 二次运行 unchanged
+        self.post_marker.unlink()
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertIn("unchanged", out)
+        self.assertFalse(self.post_marker.exists())
+
+    def test_raw_value_change_triggers_post(self):
+        self.write_manifest(
+            '[secrets]\nalpha = "secret-value"\n\n'
+            "[targets.tok]\n"
+            f"path = {str(self.raw_path)!r}\n"
+            'format = "raw"\n'
+            'secret = "alpha"\n'
+        )
+        self.run_main()
+        self.write_manifest(
+            '[secrets]\nalpha = "rotated"\n\n'
+            "[targets.tok]\n"
+            f"path = {str(self.raw_path)!r}\n"
+            'format = "raw"\n'
+            'secret = "alpha"\n'
+        )
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.raw_path.read_text(), "rotated")
+        self.assertIn("updated", out)
+
+    def test_raw_target_with_reference_secret(self):
+        # raw 的 secret 值同样支持引用表：{ file = ... } 读取凭证文件
+        src = self.tmp / "seed.txt"
+        src.write_text("file-based-token\n")
+        self.write_manifest(
+            '[secrets]\n'
+            f'alpha = {{ file = "{src}" }}\n\n'
+            "[targets.tok]\n"
+            f"path = {str(self.raw_path)!r}\n"
+            'format = "raw"\n'
+            'secret = "alpha"\n'
+        )
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        # { file = ... } 引用去末尾换行
+        self.assertEqual(self.raw_path.read_text(), "file-based-token")
 
 
 if __name__ == "__main__":

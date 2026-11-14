@@ -12,7 +12,7 @@ over time.
 
 | Tool                | Language     | Description                                                                                                                     |
 | ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's `.env` file; run post commands when they change                     |
+| [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's config file (`.env` / JSON / whole file); run post commands when they change                     |
 | [dly](#dly)         | Python 3.8+  | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
 
 ## Principles
@@ -42,9 +42,10 @@ install -m755 dly.py ~/.local/bin/dly
 ## keydist
 
 `keydist` locates a manifest (see below), resolves the secrets it
-references, and incrementally updates each consumer's `.env` file in the
-format that consumer understands. When a file's content actually changed,
-an optional `post` command runs (e.g. restart the service).
+references, and incrementally updates each consumer's config file
+(`.env` / JSON / whole file) in the format that consumer understands. When
+a file's content actually changed, an optional `post` command runs (e.g.
+restart the service).
 
 ### See it in 10 seconds
 
@@ -156,6 +157,25 @@ post = "systemctl restart myapi"
 [targets."myapi".vars]
 API_KEY = "api_key"
 DOMAIN  = "domain"
+
+# format = "json": keys are merged into the top-level JSON object. Inferred
+# from the .json suffix (format may be omitted); the existing file must be
+# a valid object. Idempotence compares parsed values — reformatting alone
+# is not a change and does not fire post. Keys are not env-var-name limited.
+[targets."myweb"]
+path = "/etc/myweb/config.json"
+
+[targets."myweb".vars]
+"api-key" = "api_key"
+
+# format = "raw": a single secret becomes the whole file content (token,
+# license, …); must be declared explicitly. The value is written verbatim
+# (UTF-8) with no trailing newline added; no vars.
+[targets."mytok"]
+path = "/etc/mytok/token"
+format = "raw"
+secret = "api_key"
+post = "systemctl restart mytok"
 ```
 
 ### Secret forms
@@ -194,10 +214,29 @@ since it would make every run look like a change. Mind the direction: tools
 like `age` randomize encryption by design, so pipe is best used to *decrypt*
 a ciphertext encrypted once offline (or `openssl enc` with a fixed `-S` salt).
 
-### Output styles
+### Output formats
 
-Each target is rendered in one of four styles: set `style = "..."` explicitly,
-or let keydist infer it from the target's name / path / post command:
+Each target is written in one of three formats: set `format = "..."`
+explicitly, or let keydist infer it from the path suffix (`.json` → `json`);
+raw has no reliable path signature and must be declared explicitly:
+
+| Format          | Written shape                                                                        |
+| --------------- | ------------------------------------------------------------------------------------ |
+| `env` (default) | key=value lines, quoted per style (see next table)                                   |
+| `json`          | merged into the top-level JSON object; the existing file must be a valid object or the whole target fails |
+| `raw`           | a single secret (`secret = "name"`) becomes the whole file content; written verbatim, no trailing newline added |
+
+`json` idempotence compares parsed values: an existing file that differs
+only in layout (indentation / compact) is not rewritten and does not fire
+`post`; values are always written as JSON strings. For `raw`, append an
+explicit trailing newline via `concat` in the manifest if your consumer
+needs one.
+
+### Output styles (format = env)
+
+Targets with format `env` are rendered in one of four styles: set
+`style = "..."` explicitly, or let keydist infer it from the target's
+name / path / post command (json / raw targets do not take a style):
 
 | Style             | Quoting                                  | Typical consumer                                                      |
 | ----------------- | ---------------------------------------- | --------------------------------------------------------------------- |
@@ -213,7 +252,9 @@ where compose and `docker run` disagree about quote semantics.
 ### Behavior
 
 - Files are rewritten only when content changes; unchanged files keep their
-  mtime and skip `post`.
+  mtime and skip `post`. For `json` targets, "changed" means parsed values
+  differ — layout-only differences are never rewritten. `raw` targets are
+  written verbatim with no trailing newline added.
 - `--dry-run` / `-n` prints a unified diff of every pending change plus the
   `post` commands that would run — no files are written, chmodded, or
   executed.

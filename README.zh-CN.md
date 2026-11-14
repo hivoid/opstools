@@ -10,7 +10,7 @@ English: [README.md](README.md)
 
 | 工具                | 语言         | 说明                                                                                   |
 | ------------------- | ------------ | -------------------------------------------------------------------------------------- |
-| [keydist](#keydist) | Python 3.11+ | 把一份集中清单里的 secrets 增量分发到各消费端的 `.env` 文件，内容变化时执行 post 命令  |
+| [keydist](#keydist) | Python 3.11+ | 把一份集中清单里的 secrets 增量分发到各消费端配置文件（`.env` / JSON / 整文件），内容变化时执行 post 命令  |
 | [dly](#dly)         | Python 3.8+  | 打开、查看、列出每日笔记与任务笔记；简短日期表达式与可组合偏移，编辑器与查看命令可配置 |
 
 ## 设计原则
@@ -37,8 +37,8 @@ install -m755 dly.py ~/.local/bin/dly
 ## keydist
 
 `keydist` 按下述规则定位清单，解析其中引用的 secrets，按各消费端能理解的
-格式**增量**更新其 `.env` 文件；文件内容实际变化时执行可选的 `post` 命令
-（例如重启服务）。
+格式**增量**更新其配置文件（`.env` / JSON / 整文件）；文件内容实际变化时
+执行可选的 `post` 命令（例如重启服务）。
 
 ### 十秒看效果
 
@@ -144,6 +144,23 @@ post = "systemctl restart myapi"
 [targets."myapi".vars]
 API_KEY = "api_key"
 DOMAIN  = "domain"
+
+# format = "json"：键值合并进顶层 JSON object。.json 后缀可自动推断（省略
+# format）；现存文件必须是合法 object。幂等比较基于解析后相等——仅排版
+# 不同不算变化、不触发 post。键不受环境变量命名约束。
+[targets."myweb"]
+path = "/etc/myweb/config.json"
+
+[targets."myweb".vars]
+"api-key" = "api_key"
+
+# format = "raw"：单个 secret 即整个文件内容（token、license 等），必须
+# 显式声明；值原样写出（UTF-8）、不追加换行，无 vars。
+[targets."mytok"]
+path = "/etc/mytok/token"
+format = "raw"
+secret = "api_key"
+post = "systemctl restart mytok"
 ```
 
 ### secret 形式
@@ -178,10 +195,25 @@ diff 需要真实值——因此必须确定性且无副作用；同一 secret �
 工具的加密输出天生随机，pipe 应用于解密一份只加密一次的密文（或用固定
 `-S` 盐的 `openssl enc`），而不是现场加密。
 
-### 输出 style
+### 输出 format
 
-每个目标按四种 style 之一渲染：可显式指定 `style = "..."`，也可由目标的
-名称/路径/post 命令自动推断：
+每个目标按三种 format 之一写入：可显式指定 `format = "..."`，也可由路径
+后缀自动推断（`.json` → `json`）；raw 无稳定路径特征，必须显式声明：
+
+| Format        | 写入形态                                                                  |
+| ------------- | ------------------------------------------------------------------------- |
+| `env`（默认） | 键值行，按 style 渲染引号（见下表）                                       |
+| `json`        | 合并进顶层 JSON object；现存文件必须是合法 object，否则该目标整体失败     |
+| `raw`         | 单个 secret（`secret = "名字"`）即整个文件内容；原样写出、不追加换行      |
+
+`json` 的幂等比较基于解析后相等：现存文件仅排版不同（缩进/紧凑）而值相同
+时不重写、不触发 `post`；值恒写为 JSON 字符串。`raw` 需要尾随换行时由清单
+用 `concat` 显式拼接。
+
+### 输出 style（format = env）
+
+format 为 `env` 的目标按四种 style 之一渲染：可显式指定 `style = "..."`，
+也可由目标的名称/路径/post 命令自动推断（json / raw 目标不接受 style）：
 
 | Style           | 引号处理                | 典型消费端                           |
 | --------------- | ----------------------- | ------------------------------------ |
@@ -205,6 +237,8 @@ diff 需要真实值——因此必须确定性且无副作用；同一 secret �
 - 同一 secret 跨目标解析值不一致时告警（多半是 `pipe` 引入了非确定性）；
   否则这类目标永远“有变化”、`post` 每次都会触发。
 - 自动清理历史运行遗留的重复键（附带警告）。
+- `json` 目标以解析后的值判断变化：仅排版不同不重写、不触发 `post`；
+  `raw` 目标值原样落盘、不追加换行。
 - 启动时检查清单权限：组/其他用户可读会告警（其中可能含 secret 引用）。
 - 输出在终端上着色；管道输出或设置了 `NO_COLOR` 时自动禁用。
 - 全部目标成功退出码 `0`；否则退出码 `1`，stderr 打印失败汇总。

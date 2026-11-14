@@ -36,3 +36,20 @@ post = "echo 'demo.env updated'"    # 演示 post；实际使用如 systemctl --
 [targets."demo".vars]
 API_KEY = "api_key"                 # 消费端键名 = [secrets] 中的 secret 名
 DOMAIN  = "domain"
+
+# 其余 format 示例——取消注释生效：
+#
+# json：键值合并进顶层 JSON object；.json 后缀可自动推断（可省略 format），
+# 现存文件必须是合法 object。幂等比较基于解析后相等，仅排版不同不触发 post。
+# [targets."demo-json"]
+# path = "examples/demo.json"
+#
+# [targets."demo-json".vars]
+# "api-key" = "api_key"             # json 键不受环境变量命名约束
+#
+# raw：单个 secret 即整个文件内容（token、license 等），必须显式声明；
+# 值原样写出、不追加换行，无 vars。
+# [targets."demo-token"]
+# path = "examples/demo.token"
+# format = "raw"
+# secret = "api_key"
