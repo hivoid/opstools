@@ -8,7 +8,8 @@
 /build/
 /bin/
 /tmp/
-__pycache__/
+/__pycache__/
+/.ruff_cache/
 
 # === 编辑器与 IDE ===
 .idea/
