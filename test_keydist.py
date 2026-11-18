@@ -11,8 +11,8 @@
 - render_env_file 增量更新（替换、追加、重复键清理、前缀保留）
 - write_target_file 权限、diff_text、find_manifest、parse_args
 - load_manifest：读取失败 / TOML 语法 / 结构类型错误在运行前统一报告
-- main() 端到端：dry-run、post 触发/跳过、fail-closed 与退出码，
-  覆盖 env / json / raw 三种 format
+- main() 端到端：dry-run、-v/--verbose 的 diff 打印语义、post 触发/跳过、
+  fail-closed 与退出码，覆盖 env / json / raw 三种 format
 """
 
 import io
@@ -1218,12 +1218,13 @@ class ManifestFormatValidationTests(TempDirBase):
 
 
 class ParseArgsTests(unittest.TestCase):
-    """parse_args：-c/--config 与 -n/--dry-run。"""
+    """parse_args：-c/--config、-n/--dry-run 与 -v/--verbose。"""
 
     def test_defaults(self):
         ns = keydist.parse_args([])
         self.assertIsNone(ns.config)
         self.assertFalse(ns.dry_run)
+        self.assertFalse(ns.verbose)
 
     def test_config_short_and_long(self):
         self.assertEqual(keydist.parse_args(["-c", "a.toml"]).config, "a.toml")
@@ -1232,6 +1233,10 @@ class ParseArgsTests(unittest.TestCase):
     def test_dry_run_flags(self):
         self.assertTrue(keydist.parse_args(["-n"]).dry_run)
         self.assertTrue(keydist.parse_args(["--dry-run"]).dry_run)
+
+    def test_verbose_flags(self):
+        self.assertTrue(keydist.parse_args(["-v"]).verbose)
+        self.assertTrue(keydist.parse_args(["--verbose"]).verbose)
 
 # ---------------------------------------------------------------------------
 # main() 端到端
@@ -1426,6 +1431,47 @@ class MainDryRunTests(MainTestBase):
         self.assertEqual(code, 0, err)
         self.assertIn("from-pipe", out)
         self.assertFalse(self.env_path.exists())
+
+
+class MainVerboseTests(MainTestBase):
+    """main() -v/--verbose：实际写入时同步打印变更 diff；dry-run 恒打印、
+    不受此开关影响；内容未变化时不打印。"""
+
+    def test_verbose_run_prints_diff_and_writes(self):
+        code, out, err = self.run_main("-v")
+        self.assertEqual(code, 0, err)
+        self.assertIn("updated", out)
+        self.assertIn("+++ ", out)
+        self.assertIn("+APP_TOKEN='secret-value'", out)
+        # diff 只随预览，不改变实际行为：文件照常写入、post 照常触发
+        self.assertIn("APP_TOKEN='secret-value'", self.env_path.read_text())
+        self.assertTrue(self.post_marker.exists())
+
+    def test_plain_run_prints_no_diff(self):
+        code, out, err = self.run_main()
+        self.assertEqual(code, 0, err)
+        self.assertIn("updated", out)
+        self.assertNotIn("+++", out)
+
+    def test_verbose_unchanged_no_diff(self):
+        self.run_main()
+        code, out, err = self.run_main("-v")
+        self.assertEqual(code, 0, err)
+        self.assertIn("unchanged", out)
+        self.assertNotIn("+++", out)
+
+    def test_dry_run_shows_diff_without_verbose(self):
+        # 预览语义不回退：-n 无需 -v 也打印 diff
+        code, out, err = self.run_main("-n")
+        self.assertEqual(code, 0, err)
+        self.assertIn("+++ ", out)
+
+    def test_dry_run_with_verbose_prints_diff_once(self):
+        # -n -v 组合走同一条件分支，diff 只打印一次
+        code, out, err = self.run_main("-n", "-v")
+        self.assertEqual(code, 0, err)
+        self.assertIn("+++ ", out)
+        self.assertEqual(out.count("+++ "), 1)
 
 
 class MainFailureTests(MainTestBase):
