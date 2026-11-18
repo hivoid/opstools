@@ -32,6 +32,8 @@ keydist — 增量分发 secrets 到各消费端配置文件（.env / JSON / 整
   （默认 ~/.config/keydist/keydist.toml）> ~/.local/etc/keydist.toml（旧默认）
   > /etc/keydist/keydist.toml
 - --dry-run：打印将发生变化的 unified diff，不写文件、不执行 post
+- -v/--verbose：实际写入时同步打印变更的 unified diff（--dry-run 恒打印
+  diff，不受此开关影响）
 - 清单在处理任何目标之前整体校验：读取失败、TOML 语法错误、结构与类型
   错误一次性全部报告（fail-fast），绝不写到一半才失败
 """
@@ -692,7 +694,8 @@ def load_manifest(path: pathlib.Path) -> dict:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """解析命令行参数：-c/--config 指定清单路径，-n/--dry-run 只预览变更。"""
+    """解析命令行参数：-c/--config 指定清单路径，-n/--dry-run 只预览变更，
+    -v/--verbose 在实际写入时同步打印变更 diff。"""
     p = argparse.ArgumentParser(
         prog="keydist",
         description="把清单里的 secrets 增量分发到各消费端配置文件"
@@ -702,6 +705,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="清单文件路径（默认按查找顺序取第一个存在的）")
     p.add_argument("-n", "--dry-run", action="store_true",
                    help="只打印将要发生的变更（unified diff），不写文件、不执行 post")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="实际写入时同步打印变更的 unified diff")
     return p.parse_args(argv)
 
 
@@ -789,11 +794,15 @@ def _resolve_target_updates(target: dict, secrets: dict, style: str | None,
 
 
 def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
-                    seen_values: dict[str, str]) -> tuple[str | None, list[str]]:
+                    verbose: bool, seen_values: dict[str, str],
+                    ) -> tuple[str | None, list[str]]:
     """处理单个目标：解析 format（env 再解析 style）→ 解析全部 vars
     （raw 则解析单个 secret）并校验值 → 按 format 渲染写入 → 按需触发
     post。返回 (结果状态, 失败消息列表)：状态为 "updated" / "unchanged" /
     "would update"，目标失败时为 None。
+
+    变更 diff：dry-run 恒打印（预览语义），实际写入仅在 verbose 为真时
+    打印（-v），内容未变化时不打印。
 
     清单预校验已保证 path 非空、format/style 合法、vars/secret 引用的
     secret 有定义；运行期仍可能失败的是 secret 解析（env 未设、文件缺失、
@@ -886,7 +895,7 @@ def _process_target(name: str, target: dict, secrets: dict, dry_run: bool,
         return None, [msg]
     state_color = {"updated": green, "would update": yellow}.get(state, dim)
     print(f"  {state_color(f'{state:<14}')}{path}")  # 先对齐后着色，避免转义码破坏列宽
-    if dry_run and changed:
+    if changed and (dry_run or verbose):
         sys.stdout.write(diff_text(path, original, new_content))
     for w in warns + render_warns:
         print(f"  {yellow('warn:')} {w}", file=sys.stderr)
@@ -936,7 +945,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         if i:
             print()  # 目标块之间空一行，便于扫读
         state, errors = _process_target(name, target, secrets,
-                                        args.dry_run, seen_values)
+                                        args.dry_run, args.verbose,
+                                        seen_values)
         if state is not None:
             counts[state] = counts.get(state, 0) + 1
         failures.extend((name, e) for e in errors)
