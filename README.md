@@ -258,6 +258,10 @@ where compose and `docker run` disagree about quote semantics.
 - `--dry-run` / `-n` prints a unified diff of every pending change plus the
   `post` commands that would run — no files are written, chmodded, or
   executed.
+- `-v` / `--verbose` prints a unified diff of each changed target while the
+  real run applies it — the diff contains secret values in plain text, so
+  mind terminal scrollback and logs; `--dry-run` always prints diffs,
+  regardless of this flag.
 - Target files are always ensured mode `0600`; new files are created `0600`
   from the start.
 - `post` is split with `shlex` and capped at 30 s; non-zero exit or timeout
@@ -279,6 +283,7 @@ where compose and `docker run` disagree about quote semantics.
 
 ```bash
 keydist                 # apply the manifest
+keydist -v              # same, printing each target's change diff as it applies
 keydist --dry-run       # show unified diffs of pending changes; run nothing
 keydist -c ~/alt.toml   # use an explicit manifest
 ```
@@ -294,6 +299,7 @@ Write `~/.config/keydist/keydist.toml` (recommended `chmod 600`), then run
 | -------------------- | ---------------------------------------------- |
 | `keydist`            | apply the manifest found via the lookup order  |
 | `keydist -c PATH`    | apply an explicit manifest                     |
+| `keydist -v`         | apply and print each target's change diff      |
 | `keydist --dry-run`  | preview diffs and post commands; touch nothing |
 | `keydist -n -c PATH` | same, with an explicit manifest                |
 

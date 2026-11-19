@@ -230,6 +230,9 @@ format 为 `env` 的目标按四种 style 之一渲染：可显式指定 `style 
 - 仅在内容变化时重写文件；未变化的文件保持 mtime 并跳过 `post`。
 - `--dry-run` / `-n` 打印每个待发生变更的 unified diff 及将要执行的
   `post` 命令——不写文件、不改权限、不执行任何命令。
+- `-v` / `--verbose` 在实际分发时同步打印每个变更目标的 unified diff
+  （diff 含 secret 明文，注意终端与日志留痕）；`--dry-run` 恒打印 diff，
+  不受此开关影响。
 - 目标文件始终确保 `0600`；新建文件从一开始就是 `0600`。
 - `post` 经 `shlex` 切分执行，超时 30 秒；非零退出或超时视为该目标失败。
 - `pipe` 命令同样经 `shlex` 切分、超时 30 秒，且在 `--dry-run` 下也会执行；
@@ -247,6 +250,7 @@ format 为 `env` 的目标按四种 style 之一渲染：可显式指定 `style 
 
 ```bash
 keydist                 # 按清单执行分发
+keydist -v              # 同上，并同步打印各目标变更的 unified diff
 keydist --dry-run       # 显示待发生变更的 unified diff，不做任何改动
 keydist -c ~/alt.toml   # 显式指定清单
 ```
@@ -262,6 +266,7 @@ keydist -c ~/alt.toml   # 显式指定清单
 | -------------------- | ------------------------------------ |
 | `keydist`            | 按查找顺序定位清单并执行分发         |
 | `keydist -c PATH`    | 使用显式清单                         |
+| `keydist -v`         | 实际分发并同步打印各目标变更的 diff  |
 | `keydist --dry-run`  | 预览 diff 与 post 命令，不做任何改动 |
 | `keydist -n -c PATH` | 同上，使用显式清单                   |
 
