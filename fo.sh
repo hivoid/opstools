@@ -13,6 +13,8 @@
 #   png = gwenview
 #   # 值按空白拆分为命令与参数: pdf = okular --unique
 #   # 不支持含空格的单个参数; 不支持行尾注释
+#
+#   todo: 增加 -z 参数使用 zoxide query 确定目录，做为 -d 的快捷操作
 
 set -euo pipefail
 
