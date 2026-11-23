@@ -144,7 +144,7 @@ resolve_opener_for() {
     echo "$opener"
     return 0
   fi
-  # P12: 只有当最后一个 '.' 出现在文件名主体中才视为扩展名
+  # 只有当最后一个 '.' 出现在文件名主体中才视为扩展名
   local base="${file##*/}"
   local ext="${base##*.}"
   if [[ "$ext" != "$base" && "$base" != .* ]]; then
@@ -354,7 +354,7 @@ for file in "${selected[@]}"; do
   [[ -n "$file" ]] || continue
   real_opener="$(resolve_opener_for "$file")" ||
     die "无法确定打开器(未指定 OPENER 且无默认可用)"
-  [[ -n "$real_opener" ]] || die "无法确定打开器" # P10: 判空
+  [[ -n "$real_opener" ]] || die "无法确定打开器" # 判空
 
   # 支持映射表带参数, 如 "pdf = okular --unique"
   declare -a opener_cmd=()
