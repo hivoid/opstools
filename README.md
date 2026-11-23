@@ -14,6 +14,7 @@ over time.
 | ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's config file (`.env` / JSON / whole file); run post commands when they change                     |
 | [dly](#dly)         | Python 3.8+  | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
+| [fo](#fo)           | Bash 4+      | Pick files with fzf and open each with a mapped or default opener; fd/fdfind/find candidates, optional preview, dry-run |
 
 ## Principles
 
@@ -35,6 +36,7 @@ repository into `~/.local/bin`:
 ```bash
 install -m755 keydist.py ~/.local/bin/keydist
 install -m755 dly.py ~/.local/bin/dly
+install -m755 fo.sh ~/.local/bin/fo
 ```
 
 ---
@@ -531,3 +533,154 @@ to where you were. Use `dly cd -v` to print just the path, e.g.
 Yes — pure standard library. Point `EDITOR_CMD` at any editor and
 `VIEWER_CMD` at e.g. `["more.com"]`; per-platform examples sit in the
 script's comments.
+
+---
+
+## fo
+
+`fo` is a file picker: it feeds a candidate list (fd / fdfind / find, tried
+in that order) into fzf and hands every picked file to an opener — an
+explicit `OPENER` argument, an extension mapping table, or the desktop
+default (`xdg-open` on Linux, `open` on macOS). It never edits files
+itself. Requires bash >= 4 and fzf.
+
+### See it in 10 seconds
+
+Dry-run still starts fzf so you can pick a file; afterwards only the
+commands that would run are printed — nothing opens, no cache writes:
+
+```bash
+fo --dry-run
+```
+
+```console
+$ fo --dry-run
+would run: fd --type f . . | fzf
+would run: xdg-open README.md
+```
+
+Try it for real — dry-run touches nothing:
+
+```bash
+fo --dry-run                                # pick a file; only the command is printed
+fo                                          # pick again; this time it opens
+```
+
+### Use cases
+
+- **Open files without leaving the keyboard** — run `fo` anywhere, type a
+  fuzzy query in fzf, press Enter, and the file opens in the right program.
+- **Per-extension openers** — map `pdf = okular --unique` or `txt = kate`
+  once in the config file; everything else falls through to `xdg-open` /
+  `open`.
+- **Stay in a deep tree** — `fo -l` reuses the directory of the previous
+  `-d` run, so repeated passes over `~/src` need no retyping.
+- **Preview before opening** — `fo -p` renders text with `bat`, images with
+  `chafa`/`viu`, PDF first pages with `pdftotext`, degrading to plain
+  `head` when none is installed.
+- **Check before opening** — `fo -n` prints the exact commands instead of
+  running them, without touching the cache.
+
+### Configuration
+
+The opener mapping table lives at
+`${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf` (override the path with
+`FO_OPENER_CONF`):
+
+```ini
+# extension = command with optional args (split on whitespace)
+pdf = okular --unique
+txt = kate
+png = gwenview
+```
+
+- The extension is matched case-insensitively against the picked file's.
+- The value is split on whitespace into a command plus arguments; arguments
+  containing spaces and end-of-line comments are not supported.
+- Per-file lookup order: explicit `OPENER` argument → mapping table →
+  `xdg-open` (Linux) / `open` (macOS).
+
+### Usage
+
+```bash
+fo                        # pick in the current directory, open with the default opener
+fo kate                   # pick, open explicitly with kate
+fo -d ~/src               # search under ~/src instead
+fo -l                     # reuse the directory from the last -d
+fo -m                     # multi-select; each picked file is opened in turn
+fo -p                     # built-in preview (bat/chafa/viu/pdftotext)
+fo -H -I                  # hidden files and no .gitignore (fd only)
+fo -n                     # dry-run: print the commands, open nothing
+fo -- --multi --height 40%   # args after -- go straight to fzf
+```
+
+- `-d DIR` searches under DIR (default `.`); when combined with `-l`, the
+  explicit `-d` wins (with a warning).
+- `-l` / `--last` reuses the directory recorded by the previous `-d`
+  (kept in the cache); with no record yet it is a hard error.
+- `-H` / `--hidden` includes hidden files — a no-op under the `find`
+  fallback, which never hides them anyway. `-I` / `--no-ignore` skips
+  `.gitignore` (fd/fdfind only; under `find` it warns and is ignored).
+- `-p` / `--preview` adds an fzf preview pane assembled from whatever is
+  installed: `bat` for text, `chafa`/`viu` for images, `pdftotext` for
+  PDFs, plain `head` otherwise.
+- `-n` / `--dry-run` prints the whole pipeline and each per-file open
+  command prefixed `would run:`; fzf still runs for selection, but nothing
+  opens and neither the last directory nor history are written.
+- `--` passes everything after it to fzf verbatim; a conflicting fzf flag
+  (its own `--preview`, say) wins over `-p`.
+- Only one positional `OPENER` is accepted, and it may appear anywhere —
+  parsing is order-independent.
+
+### Behavior
+
+- Candidates come from `fd`, then `fdfind`, then `find` — the first
+  available wins.
+- Openers run detached: `setsid -f` when available, otherwise a
+  backgrounded job with `disown`, so the opener outlives the script.
+- The last directory and a history log (`timestamp \t opener \t file`)
+  live in `${XDG_CACHE_HOME:-~/.cache}/fo`; cache writes are best-effort
+  and never fatal (read-only FS / no HOME still work, with warnings).
+- An extension is only recognized when the file's last `.` sits in the
+  name body — dotfiles like `.gitignore` never match a mapping entry.
+- Canceling fzf (Esc / Ctrl-C) or picking nothing exits `0`; a real fzf
+  failure exits `1` with a message on stderr.
+- History rows are appended on every real open; dry-run appends nothing.
+
+### Cheatsheet
+
+| Command             | Effect                                               |
+| ------------------- | ---------------------------------------------------- |
+| `fo`                | pick in the current directory, open with the default |
+| `fo kate`           | pick, open explicitly with kate                      |
+| `fo -d ~/src`       | search under ~/src                                   |
+| `fo -l`             | reuse the last searched directory                    |
+| `fo -m`             | pick several files, open each in turn                |
+| `fo -p`             | built-in preview pane (bat/chafa/viu/pdftotext)      |
+| `fo -H` / `fo -I`   | hidden files / skip .gitignore (fd only)             |
+| `fo -n`             | print what would run instead of opening              |
+| `fo -- --multi`     | pass extra flags straight to fzf                     |
+| `fo -h`             | show the usage text                                  |
+
+### FAQ
+
+**Why bash >= 4?**
+
+The script lowercases extensions with `${var,,}`; macOS's default bash 3.2
+cannot run it. Install Homebrew bash or use Linux.
+
+**Why doesn't my mapping entry take arguments with spaces?**
+
+Values are split on whitespace by design — a deliberate trade-off of the
+one-file config format. Wrap such a command in a tiny wrapper script, or
+pass an explicit `OPENER` instead.
+
+**Why doesn't `.gitignore` match a mapping entry?**
+
+An extension exists only when the last `.` sits in the name body; dotfiles
+therefore have no extension at all.
+
+**Why does canceling fzf exit 0?**
+
+Abandoning the pick is a normal outcome, not an error — same as fzf's own
+conventions; only a real fzf failure (e.g. a bad extra flag) is fatal.

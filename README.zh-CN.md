@@ -12,6 +12,7 @@ English: [README.md](README.md)
 | ------------------- | ------------ | -------------------------------------------------------------------------------------- |
 | [keydist](#keydist) | Python 3.11+ | 把一份集中清单里的 secrets 增量分发到各消费端配置文件（`.env` / JSON / 整文件），内容变化时执行 post 命令  |
 | [dly](#dly)         | Python 3.8+  | 打开、查看、列出每日笔记与任务笔记；简短日期表达式与可组合偏移，编辑器与查看命令可配置 |
+| [fo](#fo)           | Bash 4+      | 用 fzf 选取文件并按映射表或默认程序打开；fd/fdfind/find 候选、可选预览、dry-run |
 
 ## 设计原则
 
@@ -30,6 +31,7 @@ English: [README.md](README.md)
 ```bash
 install -m755 keydist.py ~/.local/bin/keydist
 install -m755 dly.py ~/.local/bin/dly
+install -m755 fo.sh ~/.local/bin/fo
 ```
 
 ---
@@ -479,3 +481,145 @@ dly -h                         # 显示用法说明后退出
 
 可以——纯标准库。把 `EDITOR_CMD` 指向任意编辑器，`VIEWER_CMD` 可设为
 如 `["more.com"]`；各平台示例见脚本注释。
+
+---
+
+## fo
+
+`fo` 是一个文件选择器：把候选列表（fd / fdfind / find，按序回退）交给
+fzf，再把选中的每个文件交给打开器——显式 `OPENER` 参数、扩展名映射表或
+桌面默认程序（Linux 的 `xdg-open`、macOS 的 `open`）。它本身不编辑文件。
+需要 bash >= 4 与 fzf。
+
+### 十秒看效果
+
+dry-run 照常启动 fzf 供选择，选完后只打印将执行的命令——不打开任何文件、
+不写缓存：
+
+```bash
+fo --dry-run
+```
+
+```console
+$ fo --dry-run
+would run: fd --type f . . | fzf
+would run: xdg-open README.md
+```
+
+动手试一试——dry-run 不产生任何副作用：
+
+```bash
+fo --dry-run                                # 选一个文件；只打印命令
+fo                                          # 再选一次；这次真正打开
+```
+
+### 使用场景
+
+- **双手不离键盘打开文件** — 任意目录运行 `fo`，fzf 里输入模糊查询、
+  回车，文件即在正确的程序中打开。
+- **按扩展名映射打开器** — 在配置文件里一次性写好
+  `pdf = okular --unique`、`txt = kate` 等；其余文件回落到
+  `xdg-open`/`open`。
+- **深目录反复翻找** — `fo -l` 沿用上一次 `-d` 的目录，反复处理
+  `~/src` 时无需重复输入路径。
+- **打开前先预览** — `fo -p` 内置预览：文本用 `bat`、图片用
+  `chafa`/`viu`、PDF 首页用 `pdftotext`，缺什么自动降级为 `head`。
+- **打开前先核对** — `fo -n` 打印将执行的命令而不执行，也不写缓存。
+
+### 配置
+
+打开器映射表位于 `${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf`
+（`FO_OPENER_CONF` 可覆盖路径）：
+
+```ini
+# 扩展名 = 命令与可选参数（按空白拆分）
+pdf = okular --unique
+txt = kate
+png = gwenview
+```
+
+- 扩展名与选中文件的扩展名大小写不敏感比较。
+- 值按空白拆分为命令与参数；不支持含空格的单个参数，也不支持行尾注释。
+- 每个文件的打开器查找顺序：显式 `OPENER` 参数 → 映射表 →
+  `xdg-open`（Linux）/ `open`（macOS）。
+
+### 用法
+
+```bash
+fo                        # 当前目录选文件，用默认打开器打开
+fo kate                   # 选文件，固定用 kate 打开
+fo -d ~/src               # 在 ~/src 下搜索
+fo -l                     # 复用上一次 -d 的目录
+fo -m                     # 多选，逐个打开
+fo -p                     # 内置预览（bat/chafa/viu/pdftotext）
+fo -H -I                  # 含隐藏文件并忽略 .gitignore（仅 fd）
+fo -n                     # dry-run：打印命令，不打开
+fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
+```
+
+- `-d DIR` 在 DIR 下搜索（默认 `.`）；与 `-l` 同给时显式 `-d` 优先
+  （并告警）。
+- `-l` / `--last` 复用上一次 `-d` 记录的目录（存于缓存）；尚无记录时
+  硬报错。
+- `-H` / `--hidden` 包含隐藏文件——find 回退时本来就包含，此选项无效。
+  `-I` / `--no-ignore` 不遵循 `.gitignore`（仅 fd/fdfind；find 回退时
+  告警并忽略）。
+- `-p` / `--preview` 增加 fzf 预览窗格，按已安装工具拼装：文本 `bat`、
+  图片 `chafa`/`viu`、PDF `pdftotext`，否则裸 `head`。
+- `-n` / `--dry-run` 打印完整 pipeline 与每个文件的打开命令（前缀
+  `would run:`）；fzf 照常启动供选择，但不打开文件，last_dir 与历史
+  均不写入。
+- `--` 之后的参数原样传给 fzf；与之冲突的 fzf 旗标（如它自己的
+  `--preview`）优先于 `-p`。
+- 只接受一个位置参数 `OPENER`，且可与选项任意混排——解析与顺序无关。
+
+### 行为细节
+
+- 候选来源按 `fd` → `fdfind` → `find` 回退，取首个可用者。
+- 打开动作脱钩执行：有 `setsid` 时 `setsid -f`，否则后台 + `disown`，
+  打开器不随脚本退出而被杀。
+- 上次目录与历史日志（`时间 \t 打开器 \t 文件`）存于
+  `${XDG_CACHE_HOME:-~/.cache}/fo`；缓存写入尽力而为、绝不致命
+  （只读 FS / 无 HOME 也可用，仅告警）。
+- 扩展名只在最后一个 `.` 位于文件名主体时才被识别——`.gitignore` 这类
+  点文件因此永远不匹配映射表。
+- 取消 fzf（Esc / Ctrl-C）或未选中任何文件退出码 `0`；fzf 真实故障
+  退出码 `1` 并在 stderr 报错。
+- 真实打开时历史逐条追加；dry-run 不追加任何记录。
+
+### 速查表
+
+| 命令              | 作用                                    |
+| ----------------- | --------------------------------------- |
+| `fo`              | 当前目录选文件，默认打开器打开          |
+| `fo kate`         | 选文件，固定用 kate 打开                |
+| `fo -d ~/src`     | 在 ~/src 下搜索                         |
+| `fo -l`           | 复用上次的搜索目录                      |
+| `fo -m`           | 多选并逐个打开                          |
+| `fo -p`           | 内置预览窗格（bat/chafa/viu/pdftotext） |
+| `fo -H` / `fo -I` | 含隐藏文件 / 忽略 .gitignore（仅 fd）   |
+| `fo -n`           | 打印将执行的命令，不实际打开            |
+| `fo -- --multi`   | 额外旗标原样传给 fzf                    |
+| `fo -h`           | 显示用法说明                            |
+
+### FAQ
+
+**为什么需要 bash >= 4？**
+
+脚本用 `${var,,}` 做扩展名小写比较；macOS 自带的 bash 3.2 无法运行，
+装 Homebrew 的 bash 或在 Linux 上使用。
+
+**映射表的值支持带空格的参数吗？**
+
+不支持——按空白拆分是这份单文件配置格式的刻意取舍；需要这类参数的
+命令包一层 wrapper 脚本，或改用显式 `OPENER`。
+
+**`.gitignore` 为什么匹配不到映射表？**
+
+扩展名只在最后一个 `.` 位于文件名主体时才存在，点文件因此没有扩展名
+可言。
+
+**取消 fzf 为什么退出码是 0？**
+
+放弃选择是正常结局而非错误——与 fzf 自身的退出约定一致；只有 fzf 真实
+故障（如传了非法旗标）才报错退出。
