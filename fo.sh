@@ -11,12 +11,14 @@
 #   pdf = okular
 #   txt = kate
 #   png = gwenview
-#   # 值可带参数: pdf = okular --unique
+#   # 值按空白拆分为命令与参数: pdf = okular --unique
+#   # 不支持含空格的单个参数; 不支持行尾注释
 
 set -euo pipefail
 
 # ---------- 常量 ----------
-PROG="fo"
+PROG="${0##*/}"
+[[ -z "$PROG" || "$PROG" == "bash" || "$PROG" == "-bash" ]] && PROG="fo"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fo"
 OPENER_CONF="${FO_OPENER_CONF:-$CONFIG_DIR/opener.conf}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/fo"
@@ -76,13 +78,35 @@ usage() {
   -p, --preview    启用内置预览（bat/chafa/viu/pdftotext 自动检测降级）
   -H, --hidden     包含隐藏文件
   -I, --no-ignore  不遵循 .gitignore（仅 fd/fdfind 有效）
-  -n, --dry-run    打印将执行的命令；仍会启动 fzf 供选择，但不实际打开
+  -n, --dry-run    打印将执行的命令；仍会启动 fzf 供选择，但不实际打开，
+                   也不写 last_dir 和历史
   -h, --help       显示本帮助
   --               其后参数原样传给 fzf（如与 -p 的 --preview 冲突，以 -- 后的为准）
+
+环境变量:
+  FO_OPENER_CONF   覆盖打开器映射表路径
+                   默认: \${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
+
+备注:
+  - -H 在 find 回退时无额外效果（find 默认包含隐藏文件）；
+    -I 在 find 回退时被忽略并警告。
+  - 映射表不支持行尾注释；值按空白拆分为命令与参数，
+    不支持含空格的单个参数。
 
 OPENER 与 -d 顺序无关；只允许一个位置参数 OPENER。
 EOF
   exit 0
+}
+
+# 检测 dir 是否含隐藏组件（. 或 ./ 开头的相对路径不算）
+# 返回 0 表示含隐藏组件，1 表示不含
+dir_has_hidden_component() {
+  local d="$1"
+  while [[ "$d" == ./* || "$d" == ../* ]]; do
+    if [[ "$d" == ./* ]]; then d="${d#./}"; else d="${d#../}"; fi
+  done
+  [[ -z "$d" || "$d" == "." || "$d" == ".." ]] && return 1
+  [[ "$d" == .?* || "$d" == */.?* ]]
 }
 
 # ---------- 打开器映射表 ----------
@@ -151,9 +175,12 @@ build_finder() {
   elif have find; then
     finder_args=(find "$dir" -type f)
     if ((include_hidden)); then
-      finder_args+=() # find 保留隐藏文件
+      : # find 默认包含隐藏文件
+    elif dir_has_hidden_component "$dir"; then
+      # dir 本身含隐藏组件: '*/.*' 会误伤 dir 下的所有文件,
+      # 跳过过滤以避免"在 ~/.config 下什么都搜不到"
+      warn "find 回退: dir 含隐藏组件, 已跳过隐藏过滤以避免漏掉文件"
     else
-      # 近似: 连同隐藏目录内容一并跳过（fd -H 会进入隐藏目录，此处从宽）
       finder_args+=(-not -path '*/.*')
     fi
     ((no_ignore)) && warn "find 回退: --no-ignore 无等效项, 该选项被忽略"
@@ -164,6 +191,9 @@ build_finder() {
 }
 
 # ---------- 内置预览（逐级检测工具） ----------
+# 注意: 本函数仅拼装内置的硬编码命令, 不接受用户输入拼接,
+# 因此不对 $viewer/$img/$pdf 做 shell 转义; 若将来支持自定义预览命令,
+# 需改为 argv 数组或对每个分支 printf %q, 以免 case 脚本被破坏。
 build_preview_cmd() {
   local viewer="head -n 300 {} 2>/dev/null"
   have bat && viewer="bat --color=always --line-range=:300 {}"
@@ -199,7 +229,7 @@ detach_run() {
     setsid -f "${cmd[@]}" >/dev/null 2>&1 || warn "打开器启动返回非零: ${cmd[0]}"
   else
     "${cmd[@]}" >/dev/null 2>&1 &
-    disown
+    disown 2>/dev/null || true
   fi
 }
 
@@ -296,7 +326,8 @@ fi
 
 # ---------- 执行 fzf ----------
 # 统一走临时文件, mapfile 不吃管道退出码; 捕获前关 pipefail 防 SIGPIPE 误杀
-tmp_sel="$(mktemp "${TMPDIR:-/tmp}/fo.XXXXXX")"
+tmp_sel="$(mktemp "${TMPDIR:-/tmp}/fo.XXXXXX")" ||
+  die "无法创建临时文件 (TMPDIR=${TMPDIR:-/tmp})"
 set +e
 set +o pipefail
 "${finder_args[@]}" | "${fzf_args[@]}" >"$tmp_sel"
