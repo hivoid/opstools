@@ -2,122 +2,191 @@
 #
 # fo - fzf 选文件并用指定或默认程序打开
 #
-# 用法:
-#   fo [OPENER] [-d DIR] [OPTIONS] [-- FZF_OPTIONS...]
+# 依赖: bash >= 4, fzf
+# 候选: fd / fdfind / find (按序回退)
+# 打开: 显式 OPENER -> 扩展名映射表 -> xdg-open(Linux)/open(macOS)
 #
-# 示例:
-#   fo okular
-#   fo okular -d ~/.config
-#   fo -d ~/.config
-#   fo -- --multi --preview 'bat --color=always {}'
-#
+# 用法: fo [OPENER] [-d DIR] [选项] [-- FZF_OPTIONS...]
+# 配置: ${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
+#   pdf = okular
+#   txt = kate
+#   png = gwenview
+#   # 值可带参数: pdf = okular --unique
+
 set -euo pipefail
 
 # ---------- 常量 ----------
 PROG="fo"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fo"
-OPENER_CONF="$CONFIG_DIR/opener.conf"
+OPENER_CONF="${FO_OPENER_CONF:-$CONFIG_DIR/opener.conf}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/fo"
 LAST_DIR_FILE="$CACHE_DIR/last_dir"
 HISTORY_FILE="$CACHE_DIR/history.log"
 
-# ---------- 默认值 ----------
+# ---------- 状态 ----------
 dir=""
 opener=""
 use_last_dir=0
 include_hidden=0
 no_ignore=0
-dry_run=0
 multi=0
+preview=0
+dry_run=0
+tmp_sel=""
+fzf_status=0
 declare -a fzf_extra=()
+declare -a finder_args=()
+declare -a selected=()
 
-# ---------- 辅助函数 ----------
+# ---------- 辅助 ----------
 die() {
   echo "$PROG: $*" >&2
   exit 1
 }
+warn() { echo "$PROG: 警告: $*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+cleanup() { [[ -n "$tmp_sel" ]] && rm -f "$tmp_sel" || true; }
+trap cleanup EXIT
+
+# best-effort 写缓存; $1=路径 $2=内容 $3=append|overwrite
+# 目录不可写只警告不中断(只读 FS / 无 HOME 也可用)
+cache_write() {
+  local path="$1" content="$2" mode="${3:-append}"
+  mkdir -p "$CACHE_DIR" 2>/dev/null || {
+    warn "无法创建缓存目录 $CACHE_DIR"
+    return 0
+  }
+  if [[ "$mode" == "overwrite" ]]; then
+    printf '%s\n' "$content" >"$path" 2>/dev/null || warn "无法写入 $path"
+  else
+    printf '%s\n' "$content" >>"$path" 2>/dev/null || warn "无法写入 $path"
+  fi
+  return 0
+}
 
 usage() {
   cat <<EOF
-用法: $PROG [OPENER] [-d DIR] [OPTIONS] [-- FZF_OPTIONS...]
+用法: $PROG [OPENER] [-d DIR] [选项] [-- FZF_OPTIONS...]
 
 选项:
-  -d DIR          在 DIR 下搜索文件（默认当前目录）
-  -l, --last      使用上次 -d 的目录
-  -H, --hidden    包含隐藏文件（传给 fd）
-  -I, --no-ignore 不遵循 .gitignore（传给 fd）
-  -m, --multi     允许 fzf 多选
-  -n, --dry-run   只打印将执行的命令，不实际打开
-  -h, --help      显示本帮助
-  --              其后参数原样传给 fzf
+  -d DIR           在 DIR 下搜索文件（默认当前目录；与 --last 同给时 -d 优先）
+  -l, --last       使用上次 -d 的目录
+  -m, --multi      允许 fzf 多选
+  -p, --preview    启用内置预览（bat/chafa/viu/pdftotext 自动检测降级）
+  -H, --hidden     包含隐藏文件
+  -I, --no-ignore  不遵循 .gitignore（仅 fd/fdfind 有效）
+  -n, --dry-run    打印将执行的命令；仍会启动 fzf 供选择，但不实际打开
+  -h, --help       显示本帮助
+  --               其后参数原样传给 fzf（如与 -p 的 --preview 冲突，以 -- 后的为准）
 
-环境变量:
-  FO_OPENER_CONF  自定义打开器映射配置文件路径
+OPENER 与 -d 顺序无关；只允许一个位置参数 OPENER。
 EOF
   exit 0
 }
 
-# 检查命令是否存在
-have() { command -v "$1" >/dev/null 2>&1; }
-
-# 解析打开器映射表: 输出与扩展名匹配的打开器，找不到则输出空
+# ---------- 打开器映射表 ----------
 lookup_opener_by_ext() {
-  local ext="$1" conf="${FO_OPENER_CONF:-$OPENER_CONF}"
-  [[ -f "$conf" ]] || return 0
+  local ext="${1,,}" # 小写比较 (bash >= 4)
+  [[ -f "$OPENER_CONF" ]] || return 0
   local line key val
   while IFS= read -r line; do
-    # 跳过空行和注释
-    [[ -z "${line// /}" || "$line" == \#* ]] && continue
+    [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
+    [[ "$line" == *=* ]] || continue
     key="${line%%=*}"
     val="${line#*=}"
-    # 去空白
-    key="$(echo "$key" | tr -d '[:space:]')"
-    val="$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    if [[ "${ext,,}" == "${key,,}" ]]; then
+    key="${key//[[:space:]]/}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    [[ "$ext" == "${key,,}" ]] && {
       echo "$val"
       return 0
-    fi
-  done <"$conf"
+    }
+  done <"$OPENER_CONF"
   return 0
 }
 
-# 选择默认打开器（按平台）
 default_opener() {
   if have xdg-open; then
     echo xdg-open
   elif have open; then
     echo open
-  else
-    return 1
-  fi
+  else return 1; fi
 }
 
-# 生成候选列表命令（不执行，仅打印/构建）
-build_finder_cmd() {
-  local d="$1"
-  local -a args=()
+resolve_opener_for() {
+  local file="$1"
+  if [[ -n "$opener" ]]; then
+    echo "$opener"
+    return 0
+  fi
+  # P12: 只有当最后一个 '.' 出现在文件名主体中才视为扩展名
+  local base="${file##*/}"
+  local ext="${base##*.}"
+  if [[ "$ext" != "$base" && "$base" != .* ]]; then
+    local mapped
+    mapped="$(lookup_opener_by_ext "$ext" || true)"
+    [[ -n "$mapped" ]] && {
+      echo "$mapped"
+      return 0
+    }
+  fi
+  default_opener
+}
+
+# ---------- 候选列表（直接填充全局 finder_args） ----------
+build_finder() {
+  finder_args=()
+  local fd_bin=""
   if have fd; then
-    args=(fd --type f)
-    ((include_hidden)) && args+=(--hidden)
-    ((no_ignore)) && args+=(--no-ignore)
-    args+=(. "$d")
+    fd_bin=fd
+  elif have fdfind; then
+    fd_bin=fdfind
+  fi
+  if [[ -n "$fd_bin" ]]; then
+    finder_args=("$fd_bin" --type f)
+    ((include_hidden)) && finder_args+=(--hidden)
+    ((no_ignore)) && finder_args+=(--no-ignore)
+    finder_args+=(. "$dir")
   elif have find; then
-    args=(find "$d" -type f)
+    finder_args=(find "$dir" -type f)
+    if ((include_hidden)); then
+      finder_args+=() # find 保留隐藏文件
+    else
+      # 近似: 连同隐藏目录内容一并跳过（fd -H 会进入隐藏目录，此处从宽）
+      finder_args+=(-not -path '*/.*')
+    fi
+    ((no_ignore)) && warn "find 回退: --no-ignore 无等效项, 该选项被忽略"
   else
     return 1
   fi
-  printf '%s\0' "${args[@]}"
+  return 0
 }
 
-# 构建 fzf 命令
-build_fzf_cmd() {
-  local -a args=(fzf)
-  ((multi)) && args+=(--multi)
-  args+=("${fzf_extra[@]}")
-  printf '%s\0' "${args[@]}"
+# ---------- 内置预览（逐级检测工具） ----------
+build_preview_cmd() {
+  local viewer="head -n 300 {} 2>/dev/null"
+  have bat && viewer="bat --color=always --line-range=:300 {}"
+
+  local img=""
+  have chafa && img="chafa {}"
+  [[ -z "$img" ]] && have viu && img="viu {}"
+
+  local pdf=""
+  have pdftotext && pdf="pdftotext -l 1 {} - 2>/dev/null"
+
+  if have file && [[ -n "$img$pdf" ]]; then
+    local branches=""
+    [[ -n "$img" ]] && branches+="image/*) $img ;; "
+    [[ -n "$pdf" ]] && branches+="application/pdf) $pdf ;; "
+    printf 'case $(file -b --mime-type {} 2>/dev/null) in %s*) %s ;; esac' \
+      "$branches" "$viewer"
+  else
+    printf '%s' "$viewer"
+  fi
 }
 
-# 脱钩运行
+# ---------- 脱钩运行 ----------
 detach_run() {
   local -a cmd=("$@")
   if ((dry_run)); then
@@ -127,20 +196,19 @@ detach_run() {
     return 0
   fi
   if have setsid; then
-    setsid -f "${cmd[@]}" >/dev/null 2>&1
+    setsid -f "${cmd[@]}" >/dev/null 2>&1 || warn "打开器启动返回非零: ${cmd[0]}"
   else
     "${cmd[@]}" >/dev/null 2>&1 &
     disown
   fi
 }
 
-# 记录历史
-log_history() {
-  local opener="$1" file="$2"
-  ((dry_run)) && return 0
-  mkdir -p "$CACHE_DIR"
-  printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$opener" "$file" >>"$HISTORY_FILE"
+# ---------- 版本守卫（${var,,} 需要 bash >= 4） ----------
+[[ -n "${BASH_VERSINFO:-}" ]] || {
+  echo "$PROG: 需要 bash 运行" >&2
+  exit 1
 }
+((BASH_VERSINFO[0] >= 4)) || die "需要 bash >= 4 (当前 ${BASH_VERSION})"
 
 # ---------- 参数解析 ----------
 while [[ $# -gt 0 ]]; do
@@ -154,6 +222,14 @@ while [[ $# -gt 0 ]]; do
     use_last_dir=1
     shift
     ;;
+  -m | --multi)
+    multi=1
+    shift
+    ;;
+  -p | --preview)
+    preview=1
+    shift
+    ;;
   -H | --hidden)
     include_hidden=1
     shift
@@ -162,79 +238,54 @@ while [[ $# -gt 0 ]]; do
     no_ignore=1
     shift
     ;;
-  -m | --multi)
-    multi=1
-    shift
-    ;;
   -n | --dry-run)
     dry_run=1
     shift
     ;;
-  -h | --help)
-    usage
-    ;;
+  -h | --help) usage ;;
   --)
     shift
     fzf_extra=("$@")
     break
     ;;
-  -*)
-    die "未知选项: $1"
-    ;;
+  -*) die "未知选项: $1" ;;
   *)
     if [[ -z "$opener" ]]; then
       opener="$1"
-    else
-      die "多余的位置参数: $1"
-    fi
+    else die "只允许一个位置参数 OPENER (多余: $1)"; fi
     shift
     ;;
   esac
 done
 
-# ---------- 目录确定 ----------
+# ---------- 目录确定（显式 -d 优先于 --last） ----------
 if ((use_last_dir)); then
-  if [[ -f "$LAST_DIR_FILE" ]]; then
-    dir="$(<"$LAST_DIR_FILE")"
+  if [[ -z "$dir" ]]; then
+    [[ -s "$LAST_DIR_FILE" ]] || die "--last 指定但无上次目录记录"
+    IFS= read -r dir <"$LAST_DIR_FILE" # 只取首行
   else
-    die "--last 指定但无上次目录记录"
+    warn "-d 与 --last 同时给出, 使用显式 -d"
   fi
 fi
-
-if [[ -z "$dir" ]]; then
-  dir="."
-fi
-
+[[ -z "$dir" ]] && dir="."
 [[ -d "$dir" ]] || die "目录不存在或不是目录: $dir"
-
-# 记录本次目录（供 --last 使用）
-if ((! dry_run)); then
-  mkdir -p "$CACHE_DIR"
-  printf '%s\n' "$dir" >"$LAST_DIR_FILE"
-fi
 
 # ---------- 依赖检查 ----------
 have fzf || die "未找到 fzf"
-if ! have fd && ! have find; then
-  die "未找到 fd 或 find，无法生成候选列表"
+build_finder || die "未找到 fd / fdfind / find, 无法生成候选列表"
+
+# 记录本次目录
+((dry_run)) || cache_write "$LAST_DIR_FILE" "$dir" overwrite
+
+# ---------- fzf 参数 ----------
+declare -a fzf_args=(fzf)
+((multi)) && fzf_args+=(--multi)
+if ((preview)); then
+  fzf_args+=(--preview "$(build_preview_cmd)")
 fi
+((${#fzf_extra[@]} > 0)) && fzf_args+=("${fzf_extra[@]}") # 先计数再展开
 
-# ---------- 生成候选并交给 fzf ----------
-declare -a finder_args=()
-# 通过 NUL 分隔安全读取
-while IFS= read -r -d '' item; do
-  finder_args+=("$item")
-done < <(build_finder_cmd "$dir") || true
-
-if [[ ${#finder_args[@]} -eq 0 ]]; then
-  die "无法构建候选列表命令"
-fi
-
-declare -a fzf_args=()
-while IFS= read -r -d '' item; do
-  fzf_args+=("$item")
-done < <(build_fzf_cmd) || true
-
+# ---------- dry-run 打印 pipeline ----------
 if ((dry_run)); then
   printf 'would run: '
   printf '%q ' "${finder_args[@]}"
@@ -243,41 +294,26 @@ if ((dry_run)); then
   printf '\n'
 fi
 
-# 执行 fzf，捕获输出（支持多行）
-declare -a selected=()
-if ((multi)); then
-  mapfile -t selected < <("${finder_args[@]}" | "${fzf_args[@]}" || true)
-else
-  out="$("${finder_args[@]}" | "${fzf_args[@]}" || true)"
-  [[ -n "$out" ]] && selected=("$out")
+# ---------- 执行 fzf ----------
+# 统一走临时文件, mapfile 不吃管道退出码; 捕获前关 pipefail 防 SIGPIPE 误杀
+tmp_sel="$(mktemp "${TMPDIR:-/tmp}/fo.XXXXXX")"
+set +e
+set +o pipefail
+"${finder_args[@]}" | "${fzf_args[@]}" >"$tmp_sel"
+fzf_status=$?
+set -o pipefail
+set -e
+mapfile -t selected <"$tmp_sel"
+
+# ---------- 退出码分类 ----------
+if ((fzf_status == 1 || fzf_status == 130)); then
+  exit 0 # 用户取消 / 无匹配: 正常结束
+elif ((fzf_status != 0)); then
+  die "fzf 异常退出 (码 $fzf_status)" # 真实故障: 显式报错
 fi
+((${#selected[@]} == 0)) && exit 0
 
-# 用户取消
-if [[ ${#selected[@]} -eq 0 ]]; then
-  exit 0
-fi
-
-# ---------- 确定打开器 ----------
-# 若未显式指定，先查扩展名映射，再回退默认
-resolve_opener_for() {
-  local file="$1"
-  if [[ -n "$opener" ]]; then
-    echo "$opener"
-    return 0
-  fi
-  local ext="${file##*.}"
-  if [[ "$ext" != "$file" ]]; then
-    local mapped
-    mapped="$(lookup_opener_by_ext "$ext")"
-    if [[ -n "$mapped" ]]; then
-      echo "$mapped"
-      return 0
-    fi
-  fi
-  default_opener
-}
-
-# 校验显式指定的打开器存在
+# ---------- 校验显式打开器 ----------
 if [[ -n "$opener" ]]; then
   have "$opener" || die "打开器不存在: $opener"
 fi
@@ -285,10 +321,18 @@ fi
 # ---------- 逐个打开 ----------
 for file in "${selected[@]}"; do
   [[ -n "$file" ]] || continue
-  real_opener="$(resolve_opener_for "$file")" || die "无法确定打开器（未指定且无默认可用）"
-  have "$real_opener" || die "打开器不存在: $real_opener"
-  log_history "$real_opener" "$file"
-  detach_run "$real_opener" "$file"
+  real_opener="$(resolve_opener_for "$file")" ||
+    die "无法确定打开器(未指定 OPENER 且无默认可用)"
+  [[ -n "$real_opener" ]] || die "无法确定打开器" # P10: 判空
+
+  # 支持映射表带参数, 如 "pdf = okular --unique"
+  declare -a opener_cmd=()
+  read -r -a opener_cmd <<<"$real_opener"
+  have "${opener_cmd[0]}" || die "打开器不存在: ${opener_cmd[0]}"
+
+  ((dry_run)) || cache_write "$HISTORY_FILE" \
+    "$(date '+%Y-%m-%d %H:%M:%S')"$'\t'"$real_opener"$'\t'"$file"
+  detach_run "${opener_cmd[@]}" "$file"
 done
 
 exit 0
