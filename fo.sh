@@ -12,16 +12,19 @@
 #   pdf = okular
 #   txt = kate
 #   png = gwenview
-#   # 值按空白拆分为命令与参数: pdf = okular --unique
-#   # 前缀控制运行方式:  "!" = 前台,  "&" = 脱钩
+#
+# 值按空白拆分为命令与参数: pdf = okular --unique
+#
+# 前缀控制运行方式: "!" = 前台, "&" = 脱钩
 #   md = !nvim
 #   pdf = &okular
+#   前缀可与命令名粘连 (!nvim) 或以空白分隔 (! nvim), 两者等价
 #
-#   不支持含空格的单个参数; 不支持行尾注释
+# 不支持含空格的单个参数; 不支持行尾注释
 #
 # 运行方式判定 (auto 默认):
-#   映射表前缀  >  -t/-x 显式开关  >  内置 TUI 名单
-#   >  无显示服务器  >  默认脱钩
+#   映射表前缀 > -t/-x 显式开关 > 内置 TUI 名单
+#   > 无显示服务器 > 默认脱钩
 #
 # todo: 增加 -z 参数使用 zoxide query 确定目录，做为 -d 的快捷操作
 
@@ -30,6 +33,7 @@ set -euo pipefail
 # ---------- 常量 ----------
 PROG="${0##*/}"
 [[ -z "$PROG" || "$PROG" == "bash" || "$PROG" == "-bash" ]] && PROG="fo"
+
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fo"
 OPENER_CONF="${FO_OPENER_CONF:-$CONFIG_DIR/opener.conf}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/fo"
@@ -45,13 +49,15 @@ no_ignore=0
 multi=0
 preview=0
 dry_run=0
-run_mode="auto" # auto | fg | detach
+run_mode="auto"    # auto | fg | detach   (-t/-x 全局开关)
+opener_mode="auto" # auto | fg | detach   (当前打开器的前缀, parse_opener 产出)
 tmp_sel=""
 fzf_status=0
 declare -a fzf_extra=()
 declare -a finder_args=()
 declare -a selected=()
-declare -A TUI_SET=() # 内置 TUI 程序名单
+declare -a opener_cmd=() # 剥离前缀后的 argv (parse_opener 产出)
+declare -A TUI_SET=()
 
 # ---------- 辅助 ----------
 die() {
@@ -100,10 +106,10 @@ usage() {
 
 环境变量:
   FO_OPENER_CONF   覆盖打开器映射表路径
-  默认: \${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
+                   默认: \${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
 
 运行方式（默认 auto，自动判定）:
-  1. 映射表前缀覆盖单个程序:   "!" = 前台,  "&" = 脱钩
+  1. 映射表前缀覆盖单个程序: "!" = 前台, "&" = 脱钩
        md = !nvim
        pdf = &okular
   2. -t / -x 全局强制覆盖
@@ -162,12 +168,38 @@ init_tui_set() {
     TUI_SET["$p"]=1
   done
 }
-
 init_tui_set
 
-# 判定单个打开器是否该前台运行; $1 = 命令名（不含前缀）
+# ---------- 打开器解析 ----------
+# 解析原始打开器字符串: 剥离运行方式前缀, 产出全局 opener_mode 与 opener_cmd
+# 兼容 "!nvim" / "! nvim" / "&mpv --no-terminal" 等写法
+# 返回非零表示剥离前缀后没有命令 (配置值只剩 "!"/"&" 或为空)
+parse_opener() {
+  local raw="$1"
+  opener_mode="auto"
+  case "$raw" in
+  \!*)
+    opener_mode="fg"
+    raw="${raw#\!}"
+    ;;
+  \&*)
+    opener_mode="detach"
+    raw="${raw#\&}"
+    ;;
+  esac
+  raw="${raw#"${raw%%[![:space:]]*}"}" # 去前导空白, 容忍 "! nvim"
+  opener_cmd=()
+  read -r -a opener_cmd <<<"$raw"
+  ((${#opener_cmd[@]} > 0))
+}
+
+# 判定单个打开器是否该前台运行; $1 = 剥离前缀后的命令名
+# 优先级: 映射表前缀 (opener_mode) > -t/-x (run_mode)
+#         > 内置 TUI 名单 > 无显示服务器 > 默认脱钩
 should_run_fg() {
-  case "$run_mode" in
+  local mode="$opener_mode"
+  [[ "$mode" == "auto" ]] && mode="$run_mode"
+  case "$mode" in
   fg) return 0 ;;
   detach) return 1 ;;
   esac
@@ -267,14 +299,11 @@ build_finder() {
 build_preview_cmd() {
   local viewer="head -n 300 {} 2>/dev/null"
   have bat && viewer="bat --color=always --line-range=:300 {}"
-
   local img=""
   have chafa && img="chafa {}"
   [[ -z "$img" ]] && have viu && img="viu {}"
-
   local pdf=""
   have pdftotext && pdf="pdftotext -l 1 {} - 2>/dev/null"
-
   if have file && [[ -n "$img$pdf" ]]; then
     local branches=""
     [[ -n "$img" ]] && branches+="image/*) $img ;; "
@@ -287,24 +316,17 @@ build_preview_cmd() {
 }
 
 # ---------- 运行打开器 ----------
-# $@ = 完整命令（打开器 + 参数 + 文件）
-# 映射表前缀: "!" = 前台, "&" = 脱钩; 其余按 should_run_fg 判定
+# $@ = 完整命令（打开器 + 参数 + 文件）; 前缀已在 parse_opener 中剥离
 # 前台: 阻塞至退出, 继承当前终端 (TUI 程序必需)
 # 脱钩: setsid/disown + 全 fd 隔离, 终端关闭不影响 (GUI 程序)
 run_opener() {
-  local fg=0
-  if [[ "$1" == "!" ]]; then
-    fg=1
-    shift
-  elif [[ "$1" == "&" ]]; then
-    shift
-  else
-    should_run_fg "$1" && fg=1
-  fi
   local -a cmd=("$@")
+  local fg=0
+  should_run_fg "${cmd[0]}" && fg=1
 
   if ((dry_run)); then
-    printf 'would run (%s): ' "$([[ $fg ]] && echo fg || echo detach)"
+    printf 'would run (%s): ' \
+      "$([[ $fg -eq 1 ]] && echo fg || echo detach)"
     printf '%q ' "${cmd[@]}"
     printf '\n'
     return 0
@@ -383,7 +405,9 @@ while [[ $# -gt 0 ]]; do
   *)
     if [[ -z "$opener" ]]; then
       opener="$1"
-    else die "只允许一个位置参数 OPENER (多余: $1)"; fi
+    else
+      die "只允许一个位置参数 OPENER (多余: $1)"
+    fi
     shift
     ;;
   esac
@@ -456,20 +480,13 @@ for file in "${selected[@]}"; do
     die "无法确定打开器(未指定 OPENER 且无默认可用)"
   [[ -n "$real_opener" ]] || die "无法确定打开器"
 
-  # 拆分为 argv, 支持映射表带参数与前缀 ("!"=前台, "&"=脱钩)
-  declare -a opener_cmd=()
-  read -r -a opener_cmd <<<"$real_opener"
-
-  # 剥掉前缀后校验命令存在
-  local_probe="${opener_cmd[0]}"
-  if [[ "$local_probe" == "!" || "$local_probe" == "&" ]]; then
-    local_probe="${opener_cmd[1]:-}"
-    [[ -n "$local_probe" ]] || die "映射表值缺少命令: $real_opener"
-  fi
-  have "$local_probe" || die "打开器不存在: $local_probe"
+  # 剥离前缀并拆分为 argv; 兼容 "!nvim" / "! nvim" / "&mpv --no-terminal"
+  parse_opener "$real_opener" || die "映射表值缺少命令: $real_opener"
+  have "${opener_cmd[0]}" || die "打开器不存在: ${opener_cmd[0]}"
 
   ((dry_run)) || cache_write "$HISTORY_FILE" \
     "$(date '+%Y-%m-%d %H:%M:%S')"$'\t'"$real_opener"$'\t'"$file"
+
   run_opener "${opener_cmd[@]}" "$file"
 done
 
