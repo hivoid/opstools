@@ -556,7 +556,7 @@ fo --dry-run
 ```console
 $ fo --dry-run
 would run: fd --type f . . | fzf
-would run: xdg-open README.md
+would run (detach): xdg-open README.md
 ```
 
 Try it for real — dry-run touches nothing:
@@ -573,6 +573,10 @@ fo                                          # pick again; this time it opens
 - **Per-extension openers** — map `pdf = okular --unique` or `txt = kate`
   once in the config file; everything else falls through to `xdg-open` /
   `open`.
+- **TUI and GUI openers each run where they belong** — TUI programs like
+  nvim/less run in the foreground; GUI programs run detached and leave the
+  terminal free. The mapping table's `!`/`&` prefixes and the `-t`/`-x`
+  switches override the auto-detected mode.
 - **Stay in a deep tree** — `fo -l` reuses the directory of the previous
   `-d` run, so repeated passes over `~/src` need no retyping.
 - **Preview before opening** — `fo -p` renders text with `bat`, images with
@@ -592,11 +596,17 @@ The opener mapping table lives at
 pdf = okular --unique
 txt = kate
 png = gwenview
+
+# a ! / & prefix before the command picks the run mode: ! = foreground, & = detached
+md  = !nvim
+pdf = &okular
 ```
 
 - The extension is matched case-insensitively against the picked file's.
 - The value is split on whitespace into a command plus arguments; arguments
   containing spaces and end-of-line comments are not supported.
+- A `!` / `&` prefix may be glued to the command (`!nvim`) or separated by
+  whitespace (`! nvim`) — both are equivalent.
 - Per-file lookup order: explicit `OPENER` argument → mapping table →
   `xdg-open` (Linux) / `open` (macOS).
 
@@ -611,6 +621,8 @@ fo -m                     # multi-select; each picked file is opened in turn
 fo -p                     # built-in preview (bat/chafa/viu/pdftotext)
 fo -H -I                  # hidden files and no .gitignore (fd only)
 fo -n                     # dry-run: print the commands, open nothing
+fo -t                     # run all openers in the foreground
+fo -x                     # run all openers detached
 fo -- --multi --height 40%   # args after -- go straight to fzf
 ```
 
@@ -624,9 +636,14 @@ fo -- --multi --height 40%   # args after -- go straight to fzf
 - `-p` / `--preview` adds an fzf preview pane assembled from whatever is
   installed: `bat` for text, `chafa`/`viu` for images, `pdftotext` for
   PDFs, plain `head` otherwise.
-- `-n` / `--dry-run` prints the whole pipeline and each per-file open
-  command prefixed `would run:`; fzf still runs for selection, but nothing
-  opens and neither the last directory nor history are written.
+- `-t` / `--foreground` runs every opener in the foreground (blocks until
+  exit; multi-select opens them one by one); `-x` / `--detach` runs every
+  opener detached (returns the terminal at once; closing it later is
+  harmless). When both are given, the later one wins.
+- `-n` / `--dry-run` prints the whole pipeline (prefixed `would run:`) and
+  each per-file open command (prefixed `would run (fg):` /
+  `would run (detach):` per the run mode); fzf still runs for selection,
+  but nothing opens and neither the last directory nor history are written.
 - `--` passes everything after it to fzf verbatim; a conflicting fzf flag
   (its own `--preview`, say) wins over `-p`.
 - Only one positional `OPENER` is accepted, and it may appear anywhere —
@@ -636,8 +653,15 @@ fo -- --multi --height 40%   # args after -- go straight to fzf
 
 - Candidates come from `fd`, then `fdfind`, then `find` — the first
   available wins.
-- Openers run detached: `setsid -f` when available, otherwise a
-  backgrounded job with `disown`, so the opener outlives the script.
+- Openers run either in the foreground or detached; the mode is
+  auto-detected with this priority: the mapping table's `!` (foreground) /
+  `&` (detached) prefix → the `-t` / `-x` switches → the built-in TUI list
+  (nvim/vim/less/htop, …) → no display server (SSH / bare TTY) → detached
+  by default (GUI programs).
+- Foreground openers block until exit; a non-zero exit only draws a
+  warning. Detached openers run under `setsid -f` when available,
+  otherwise backgrounded with `disown` and with all file descriptors
+  redirected, so the opener outlives the script.
 - The last directory and a history log (`timestamp \t opener \t file`)
   live in `${XDG_CACHE_HOME:-~/.cache}/fo`; cache writes are best-effort
   and never fatal (read-only FS / no HOME still work, with warnings).
@@ -659,6 +683,8 @@ fo -- --multi --height 40%   # args after -- go straight to fzf
 | `fo -p`             | built-in preview pane (bat/chafa/viu/pdftotext)      |
 | `fo -H` / `fo -I`   | hidden files / skip .gitignore (fd only)             |
 | `fo -n`             | print what would run instead of opening              |
+| `fo -t`             | run all openers in the foreground                    |
+| `fo -x`             | run all openers detached                             |
 | `fo -- --multi`     | pass extra flags straight to fzf                     |
 | `fo -h`             | show the usage text                                  |
 

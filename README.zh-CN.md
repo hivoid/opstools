@@ -503,7 +503,7 @@ fo --dry-run
 ```console
 $ fo --dry-run
 would run: fd --type f . . | fzf
-would run: xdg-open README.md
+would run (detach): xdg-open README.md
 ```
 
 动手试一试——dry-run 不产生任何副作用：
@@ -520,6 +520,8 @@ fo                                          # 再选一次；这次真正打开
 - **按扩展名映射打开器** — 在配置文件里一次性写好
   `pdf = okular --unique`、`txt = kate` 等；其余文件回落到
   `xdg-open`/`open`。
+- **TUI 与 GUI 各归其位** — nvim/less 等 TUI 程序前台运行占用终端，GUI
+  程序脱钩运行不占终端；映射表 `!`/`&` 前缀与 `-t`/`-x` 可覆盖自动判定。
 - **深目录反复翻找** — `fo -l` 沿用上一次 `-d` 的目录，反复处理
   `~/src` 时无需重复输入路径。
 - **打开前先预览** — `fo -p` 内置预览：文本用 `bat`、图片用
@@ -536,10 +538,15 @@ fo                                          # 再选一次；这次真正打开
 pdf = okular --unique
 txt = kate
 png = gwenview
+
+# 命令前的 ! / & 前缀控制运行方式: ! = 前台, & = 脱钩
+md  = !nvim
+pdf = &okular
 ```
 
 - 扩展名与选中文件的扩展名大小写不敏感比较。
 - 值按空白拆分为命令与参数；不支持含空格的单个参数，也不支持行尾注释。
+- `!` / `&` 前缀可与命令名粘连（`!nvim`）或以空白分隔（`! nvim`），两者等价。
 - 每个文件的打开器查找顺序：显式 `OPENER` 参数 → 映射表 →
   `xdg-open`（Linux）/ `open`（macOS）。
 
@@ -554,6 +561,8 @@ fo -m                     # 多选，逐个打开
 fo -p                     # 内置预览（bat/chafa/viu/pdftotext）
 fo -H -I                  # 含隐藏文件并忽略 .gitignore（仅 fd）
 fo -n                     # dry-run：打印命令，不打开
+fo -t                     # 打开器全部前台运行，阻塞至退出
+fo -x                     # 打开器全部脱钩运行，不占终端
 fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
 ```
 
@@ -576,7 +585,12 @@ fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
 ### 行为细节
 
 - 候选来源按 `fd` → `fdfind` → `find` 回退，取首个可用者。
-- 打开动作脱钩执行：有 `setsid` 时 `setsid -f`，否则后台 + `disown`，
+- 打开器分前台与脱钩两类，运行方式自动判定，优先级从高到低：映射表的
+  `!`（前台）/ `&`（脱钩）前缀 → `-t` / `-x` 开关 → 内置 TUI 名单
+  （nvim/vim/less/htop 等）→ 无显示服务器（SSH/纯 TTY）→
+  默认脱钩（GUI 程序）。
+- 前台打开器阻塞至退出，退出码非零仅告警；脱钩打开器经 `setsid -f`
+  隔离，缺失时后台 + `disown`，全部 fd 重定向，
   打开器不随脚本退出而被杀。
 - 上次目录与历史日志（`时间 \t 打开器 \t 文件`）存于
   `${XDG_CACHE_HOME:-~/.cache}/fo`；缓存写入尽力而为、绝不致命
