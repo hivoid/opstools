@@ -143,7 +143,7 @@ TUI_LIST=(
   most lv pg man info pinfo
   w3m lynx links elinks browsh
   vifm ranger mc nnn yazi lf
-  # ===== 兜底 (不收文件参数) =====
+  # ===== 兜底 (不收文件参数，但能防止错误配置或传参后前台进程在终端消失不见) =====
   top htop btop iotop glances atop dstat watch powertop s-tui
   lazygit tig gitui
   fzf dialog whiptail ncdu
