@@ -7,14 +7,23 @@
 # 打开: 显式 OPENER -> 扩展名映射表 -> xdg-open(Linux)/open(macOS)
 #
 # 用法: fo [OPENER] [-d DIR] [选项] [-- FZF_OPTIONS...]
+#
 # 配置: ${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
 #   pdf = okular
 #   txt = kate
 #   png = gwenview
 #   # 值按空白拆分为命令与参数: pdf = okular --unique
-#   # 不支持含空格的单个参数; 不支持行尾注释
+#   # 前缀控制运行方式:  "!" = 前台,  "&" = 脱钩
+#   md = !nvim
+#   pdf = &okular
 #
-#   todo: 增加 -z 参数使用 zoxide query 确定目录，做为 -d 的快捷操作
+#   不支持含空格的单个参数; 不支持行尾注释
+#
+# 运行方式判定 (auto 默认):
+#   映射表前缀  >  -t/-x 显式开关  >  内置 TUI 名单
+#   >  无显示服务器  >  默认脱钩
+#
+# todo: 增加 -z 参数使用 zoxide query 确定目录，做为 -d 的快捷操作
 
 set -euo pipefail
 
@@ -36,11 +45,13 @@ no_ignore=0
 multi=0
 preview=0
 dry_run=0
+run_mode="auto" # auto | fg | detach
 tmp_sel=""
 fzf_status=0
 declare -a fzf_extra=()
 declare -a finder_args=()
 declare -a selected=()
+declare -A TUI_SET=() # 内置 TUI 程序名单
 
 # ---------- 辅助 ----------
 die() {
@@ -80,6 +91,8 @@ usage() {
   -p, --preview    启用内置预览（bat/chafa/viu/pdftotext 自动检测降级）
   -H, --hidden     包含隐藏文件
   -I, --no-ignore  不遵循 .gitignore（仅 fd/fdfind 有效）
+  -t, --foreground 打开器全部在前台运行（阻塞至退出，多选时逐个顺序打开）
+  -x, --detach     打开器全部脱钩运行（不占终端，终端关闭不影响）
   -n, --dry-run    打印将执行的命令；仍会启动 fzf 供选择，但不实际打开，
                    也不写 last_dir 和历史
   -h, --help       显示本帮助
@@ -87,15 +100,23 @@ usage() {
 
 环境变量:
   FO_OPENER_CONF   覆盖打开器映射表路径
-                   默认: \${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
+  默认: \${XDG_CONFIG_HOME:-~/.config}/fo/opener.conf
+
+运行方式（默认 auto，自动判定）:
+  1. 映射表前缀覆盖单个程序:   "!" = 前台,  "&" = 脱钩
+       md = !nvim
+       pdf = &okular
+  2. -t / -x 全局强制覆盖
+  3. 内置 TUI 名单（nvim/vim/less/htop/emacs 等）→ 前台
+  4. 无显示服务器（SSH/纯 TTY）→ 前台
+  5. 其余（GUI 程序）→ 脱钩
 
 备注:
   - -H 在 find 回退时无额外效果（find 默认包含隐藏文件）；
     -I 在 find 回退时被忽略并警告。
   - 映射表不支持行尾注释；值按空白拆分为命令与参数，
     不支持含空格的单个参数。
-
-OPENER 与 -d 顺序无关；只允许一个位置参数 OPENER。
+  - OPENER 与 -d 顺序无关；只允许一个位置参数 OPENER。
 EOF
   exit 0
 }
@@ -109,6 +130,30 @@ dir_has_hidden_component() {
   done
   [[ -z "$d" || "$d" == "." || "$d" == ".." ]] && return 1
   [[ "$d" == .?* || "$d" == */.?* ]]
+}
+
+# ---------- 内置 TUI 名单 ----------
+init_tui_set() {
+  local p
+  for p in nvim vim vi less more most nano micro helix hx emacs \
+    htop btop top iotop nmtui lazygit tig fzf; do
+    TUI_SET["$p"]=1
+  done
+}
+init_tui_set
+
+# 判定单个打开器是否该前台运行; $1 = 命令名（不含前缀）
+should_run_fg() {
+  case "$run_mode" in
+  fg) return 0 ;;
+  detach) return 1 ;;
+  esac
+  # 内置 TUI 名单
+  [[ -n "${TUI_SET[$1]:-}" ]] && return 0
+  # 无显示服务器 → GUI 起不来, 前台更合理
+  [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]] && return 0
+  # 默认脱钩
+  return 1
 }
 
 # ---------- 打开器映射表 ----------
@@ -146,7 +191,7 @@ resolve_opener_for() {
     echo "$opener"
     return 0
   fi
-  # 只有当最后一个 '.' 出现在文件名主体中才视为扩展名
+  # 只有当最后一个 '.' 出现在文件名主体中才视为扩展名（排除点文件）
   local base="${file##*/}"
   local ext="${base##*.}"
   if [[ "$ext" != "$base" && "$base" != .* ]]; then
@@ -218,24 +263,47 @@ build_preview_cmd() {
   fi
 }
 
-# ---------- 脱钩运行 ----------
-detach_run() {
+# ---------- 运行打开器 ----------
+# $@ = 完整命令（打开器 + 参数 + 文件）
+# 映射表前缀: "!" = 前台, "&" = 脱钩; 其余按 should_run_fg 判定
+# 前台: 阻塞至退出, 继承当前终端 (TUI 程序必需)
+# 脱钩: setsid/disown + 全 fd 隔离, 终端关闭不影响 (GUI 程序)
+run_opener() {
+  local fg=0
+  if [[ "$1" == "!" ]]; then
+    fg=1
+    shift
+  elif [[ "$1" == "&" ]]; then
+    shift
+  else
+    should_run_fg "$1" && fg=1
+  fi
   local -a cmd=("$@")
+
   if ((dry_run)); then
-    printf 'would run: '
+    printf 'would run (%s): ' "$([[ $fg ]] && echo fg || echo detach)"
     printf '%q ' "${cmd[@]}"
     printf '\n'
     return 0
   fi
+
+  if ((fg)); then
+    local rc=0
+    "${cmd[@]}" || rc=$?
+    ((rc != 0)) && warn "打开器退出码 $rc: ${cmd[0]}"
+    return 0
+  fi
+
   if have setsid; then
-    setsid -f "${cmd[@]}" >/dev/null 2>&1 || warn "打开器启动返回非零: ${cmd[0]}"
+    setsid -f "${cmd[@]}" </dev/null >/dev/null 2>&1 ||
+      warn "打开器启动返回非零: ${cmd[0]}"
   else
-    "${cmd[@]}" >/dev/null 2>&1 &
+    "${cmd[@]}" </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
   fi
 }
 
-# ---------- 版本守卫（${var,,} 需要 bash >= 4） ----------
+# ---------- 版本守卫（${var,,} / declare -A 需要 bash >= 4） ----------
 [[ -n "${BASH_VERSINFO:-}" ]] || {
   echo "$PROG: 需要 bash 运行" >&2
   exit 1
@@ -268,6 +336,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   -I | --no-ignore)
     no_ignore=1
+    shift
+    ;;
+  -t | --foreground)
+    run_mode="fg"
+    shift
+    ;;
+  -x | --detach)
+    run_mode="detach"
     shift
     ;;
   -n | --dry-run)
@@ -306,7 +382,7 @@ fi
 have fzf || die "未找到 fzf"
 build_finder || die "未找到 fd / fdfind / find, 无法生成候选列表"
 
-# 记录本次目录
+# 记录本次目录（覆盖写, best-effort）
 ((dry_run)) || cache_write "$LAST_DIR_FILE" "$dir" overwrite
 
 # ---------- fzf 参数 ----------
@@ -328,8 +404,7 @@ fi
 
 # ---------- 执行 fzf ----------
 # 统一走临时文件, mapfile 不吃管道退出码; 捕获前关 pipefail 防 SIGPIPE 误杀
-tmp_sel="$(mktemp "${TMPDIR:-/tmp}/fo.XXXXXX")" ||
-  die "无法创建临时文件 (TMPDIR=${TMPDIR:-/tmp})"
+tmp_sel="$(mktemp "${TMPDIR:-/tmp}/fo.XXXXXX")" || die "无法创建临时文件 (TMPDIR=${TMPDIR:-/tmp})"
 set +e
 set +o pipefail
 "${finder_args[@]}" | "${fzf_args[@]}" >"$tmp_sel"
@@ -356,16 +431,23 @@ for file in "${selected[@]}"; do
   [[ -n "$file" ]] || continue
   real_opener="$(resolve_opener_for "$file")" ||
     die "无法确定打开器(未指定 OPENER 且无默认可用)"
-  [[ -n "$real_opener" ]] || die "无法确定打开器" # 判空
+  [[ -n "$real_opener" ]] || die "无法确定打开器"
 
-  # 支持映射表带参数, 如 "pdf = okular --unique"
+  # 拆分为 argv, 支持映射表带参数与前缀 ("!"=前台, "&"=脱钩)
   declare -a opener_cmd=()
   read -r -a opener_cmd <<<"$real_opener"
-  have "${opener_cmd[0]}" || die "打开器不存在: ${opener_cmd[0]}"
+
+  # 剥掉前缀后校验命令存在
+  local_probe="${opener_cmd[0]}"
+  if [[ "$local_probe" == "!" || "$local_probe" == "&" ]]; then
+    local_probe="${opener_cmd[1]:-}"
+    [[ -n "$local_probe" ]] || die "映射表值缺少命令: $real_opener"
+  fi
+  have "$local_probe" || die "打开器不存在: $local_probe"
 
   ((dry_run)) || cache_write "$HISTORY_FILE" \
     "$(date '+%Y-%m-%d %H:%M:%S')"$'\t'"$real_opener"$'\t'"$file"
-  detach_run "${opener_cmd[@]}" "$file"
+  run_opener "${opener_cmd[@]}" "$file"
 done
 
 exit 0
