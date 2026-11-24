@@ -575,9 +575,12 @@ fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
   告警并忽略）。
 - `-p` / `--preview` 增加 fzf 预览窗格，按已安装工具拼装：文本 `bat`、
   图片 `chafa`/`viu`、PDF `pdftotext`，否则裸 `head`。
-- `-n` / `--dry-run` 打印完整 pipeline 与每个文件的打开命令（前缀
-  `would run:`）；fzf 照常启动供选择，但不打开文件，last_dir 与历史
-  均不写入。
+- `-t` / `--foreground` 打开器全部前台运行（阻塞至退出；多选时逐个顺序
+  打开）；`-x` / `--detach` 打开器全部脱钩运行（不占终端，终端关闭不影响）；
+  两者同给时后出现的生效。
+- `-n` / `--dry-run` 打印完整 pipeline（前缀 `would run:`）与每个文件的
+  打开命令（按运行方式标注 `would run (fg):` / `would run (detach):`）；
+  fzf 照常启动供选择，但不打开文件，last_dir 与历史均不写入。
 - `--` 之后的参数原样传给 fzf；与之冲突的 fzf 旗标（如它自己的
   `--preview`）优先于 `-p`。
 - 只接受一个位置参数 `OPENER`，且可与选项任意混排——解析与顺序无关。
@@ -613,6 +616,8 @@ fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
 | `fo -p`           | 内置预览窗格（bat/chafa/viu/pdftotext） |
 | `fo -H` / `fo -I` | 含隐藏文件 / 忽略 .gitignore（仅 fd）   |
 | `fo -n`           | 打印将执行的命令，不实际打开            |
+| `fo -t`           | 打开器全部前台运行，阻塞至退出          |
+| `fo -x`           | 打开器全部脱钩运行，不占终端            |
 | `fo -- --multi`   | 额外旗标原样传给 fzf                    |
 | `fo -h`           | 显示用法说明                            |
 
