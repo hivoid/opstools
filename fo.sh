@@ -133,13 +133,36 @@ dir_has_hidden_component() {
 }
 
 # ---------- 内置 TUI 名单 ----------
+# 一个平铺列表, 多行排列仅为可读; 无分类语义, 增删随意
+# 第一段: 合法打开器 —— 能裸传文件参数, 按常用度降序
+# 第二段: 兜底程序 —— 不收文件参数, 仅为误配置时防脱钩卡死
+TUI_LIST=(
+  # ===== 合法打开器 =====
+  nvim vim vi nano emacs micro less more
+  helix hx kak vis amp jed joe mg ne ee
+  most lv pg man info pinfo
+  w3m lynx links elinks browsh
+  vifm ranger mc nnn yazi lf
+  # ===== 兜底 (不收文件参数) =====
+  top htop btop iotop glances atop dstat watch powertop s-tui
+  lazygit tig gitui
+  fzf dialog whiptail ncdu
+  ssh mosh telnet nmtui
+  ncmpcpp cmus mocp alsamixer pulsemixer
+  iftop nethogs iptraf wavemon vnstat
+  weechat irssi mutt neomutt alot aerc
+  psql mysql sqlite3 mongosh redis-cli pgcli mycli litecli usql
+  python ipython node irb ghci lua R
+  fff clifm
+)
+
 init_tui_set() {
   local p
-  for p in nvim vim vi less more most nano micro helix hx emacs \
-    htop btop top iotop nmtui lazygit tig fzf; do
+  for p in "${TUI_LIST[@]}"; do
     TUI_SET["$p"]=1
   done
 }
+
 init_tui_set
 
 # 判定单个打开器是否该前台运行; $1 = 命令名（不含前缀）
