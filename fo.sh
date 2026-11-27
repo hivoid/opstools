@@ -4,7 +4,7 @@
 #
 # 依赖: bash >= 4, fzf
 # 候选: fd / fdfind / find (按序回退)
-# 打开: 显式 OPENER -> 扩展名映射表 -> xdg-open(Linux)/open(macOS)
+# 打开: 显式 OPENER -> 扩展名映射表 -> MIME 映射表 -> xdg-open(Linux)/open(macOS)
 #
 # 用法: fo [OPENER] [-d DIR] [选项] [-- FZF_OPTIONS...]
 #
@@ -19,6 +19,12 @@
 #   md = !nvim
 #   pdf = &okular
 #   前缀可与命令名粘连 (!nvim) 或以空白分隔 (! nvim), 两者等价
+#
+# MIME 兜底: 含 "/" 的 key 按 glob 匹配 file(1) 检出的 MIME 类型,
+# 仅当扩展名未命中时才检测, 覆盖 .bashrc/Makefile 等无扩展名文件
+#   text/* = !nvim
+#   application/json = jq
+# 首条命中生效, 更具体的 MIME key (如 text/x-shellscript) 写在通配前面
 #
 # 不支持含空格的单个参数; 不支持行尾注释
 #
@@ -122,6 +128,9 @@ usage() {
     -I 在 find 回退时被忽略并警告。
   - 映射表不支持行尾注释；值按空白拆分为命令与参数，
     不支持含空格的单个参数。
+  - 映射表按 扩展名 → MIME 顺序查找，首条命中生效：含 "/" 的 key
+    （如 text/*）按 glob 匹配 file(1) 检出的 MIME 类型，仅在扩展名
+    未命中时检测，可覆盖 .bashrc/Makefile 等无扩展名文件。
   - OPENER 与 -d 顺序无关；只允许一个位置参数 OPENER。
 EOF
   exit 0
@@ -212,8 +221,10 @@ should_run_fg() {
 }
 
 # ---------- 打开器映射表 ----------
-lookup_opener_by_ext() {
-  local ext="${1,,}" # 小写比较 (bash >= 4)
+# 逐行读取映射表, 输出归一化的 "key<TAB>val" 行:
+# 跳过空行/注释/无 "=" 行; key 去所有空白, val 去首尾空白
+# (val 内部空白保留, 交由 parse_opener 拆 argv)。文件不存在则无输出。
+conf_entries() {
   [[ -f "$OPENER_CONF" ]] || return 0
   local line key val
   while IFS= read -r line; do
@@ -224,11 +235,39 @@ lookup_opener_by_ext() {
     key="${key//[[:space:]]/}"
     val="${val#"${val%%[![:space:]]*}"}"
     val="${val%"${val##*[![:space:]]}"}"
+    printf '%s\t%s\n' "$key" "$val"
+  done <"$OPENER_CONF"
+}
+
+# 扩展名查找 (key = 扩展名): 从上到下首条命中生效
+lookup_opener_by_ext() {
+  local ext="${1,,}" key val # 小写比较 (bash >= 4)
+  while IFS=$'\t' read -r key val; do
     [[ "$ext" == "${key,,}" ]] && {
       echo "$val"
       return 0
     }
-  done <"$OPENER_CONF"
+  done < <(conf_entries)
+  return 0
+}
+
+# MIME 兜底 (key 含 "/" 视为 MIME 模式, 按 glob 匹配, 支持 text/* 通配)
+# 仅当扩展名未命中时调用; file(1) 缺失则静默跳过该层, 回退默认打开器
+# 覆盖 .bashrc/.gitconfig/Makefile 等点文件与无扩展名文件
+lookup_opener_by_mime() {
+  local file="$1" mime key val
+  have file || return 0
+  mime="$(file -b --mime-type -- "$file" 2>/dev/null)" || return 0
+  [[ -n "$mime" ]] || return 0
+  while IFS=$'\t' read -r key val; do
+    [[ "$key" == */* ]] || continue # 只处理含 "/" 的 MIME 条目
+    # RHS 不加引号是刻意的: 按 glob 匹配 (text/*)
+    # shellcheck disable=SC2053
+    [[ "${mime,,}" == ${key,,} ]] && {
+      echo "$val"
+      return 0
+    }
+  done < <(conf_entries)
   return 0
 }
 
@@ -241,7 +280,7 @@ default_opener() {
 }
 
 resolve_opener_for() {
-  local file="$1"
+  local file="$1" mapped=""
   if [[ -n "$opener" ]]; then
     echo "$opener"
     return 0
@@ -250,13 +289,18 @@ resolve_opener_for() {
   local base="${file##*/}"
   local ext="${base##*.}"
   if [[ "$ext" != "$base" && "$base" != .* ]]; then
-    local mapped
     mapped="$(lookup_opener_by_ext "$ext" || true)"
     [[ -n "$mapped" ]] && {
       echo "$mapped"
       return 0
     }
   fi
+  # 扩展名未命中 (点文件/无扩展名/未知扩展名) → MIME 规则兜底
+  mapped="$(lookup_opener_by_mime "$file" || true)"
+  [[ -n "$mapped" ]] && {
+    echo "$mapped"
+    return 0
+  }
   default_opener
 }
 
