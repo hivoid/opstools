@@ -540,7 +540,7 @@ script's comments.
 
 `fo` is a file picker: it feeds a candidate list (fd / fdfind / find, tried
 in that order) into fzf and hands every picked file to an opener — an
-explicit `OPENER` argument, an extension mapping table, or the desktop
+explicit `OPENER` argument, an extension/MIME mapping table, or the desktop
 default (`xdg-open` on Linux, `open` on macOS). It never edits files
 itself. Requires bash >= 4 and fzf.
 
@@ -570,9 +570,10 @@ fo                                          # pick again; this time it opens
 
 - **Open files without leaving the keyboard** — run `fo` anywhere, type a
   fuzzy query in fzf, press Enter, and the file opens in the right program.
-- **Per-extension openers** — map `pdf = okular --unique` or `txt = kate`
-  once in the config file; everything else falls through to `xdg-open` /
-  `open`.
+- **Per-extension and MIME openers** — map `pdf = okular --unique`,
+  `txt = kate`, or a catch-all `text/* = !nvim` (covers `.bashrc`,
+  `Makefile`, and other extension-less files); everything else falls
+  through to `xdg-open` / `open`.
 - **TUI and GUI openers each run where they belong** — TUI programs like
   nvim/less run in the foreground; GUI programs run detached and leave the
   terminal free. The mapping table's `!`/`&` prefixes and the `-t`/`-x`
@@ -597,18 +598,27 @@ pdf = okular --unique
 txt = kate
 png = gwenview
 
+# MIME fallback: a key containing "/" glob-matches the type reported by
+# file(1); checked only when no extension matched — covers .bashrc, Makefile, …
+text/* = !nvim
+
 # a ! / & prefix before the command picks the run mode: ! = foreground, & = detached
 md  = !nvim
 pdf = &okular
 ```
 
 - The extension is matched case-insensitively against the picked file's.
+- A MIME entry (key containing `/`) is glob-matched, case-insensitively,
+  against the MIME type reported by `file(1)`; it is consulted only when no
+  extension rule matched, and skipped entirely if `file` is missing. First
+  match wins — put specific keys (e.g. `text/x-shellscript`) before
+  wildcards like `text/*`.
 - The value is split on whitespace into a command plus arguments; arguments
   containing spaces and end-of-line comments are not supported.
 - A `!` / `&` prefix may be glued to the command (`!nvim`) or separated by
   whitespace (`! nvim`) — both are equivalent.
-- Per-file lookup order: explicit `OPENER` argument → mapping table →
-  `xdg-open` (Linux) / `open` (macOS).
+- Per-file lookup order: explicit `OPENER` argument → mapping table
+  (extensions first, then MIME) → `xdg-open` (Linux) / `open` (macOS).
 
 ### Usage
 
@@ -666,7 +676,9 @@ fo -- --multi --height 40%   # args after -- go straight to fzf
   live in `${XDG_CACHE_HOME:-~/.cache}/fo`; cache writes are best-effort
   and never fatal (read-only FS / no HOME still work, with warnings).
 - An extension is only recognized when the file's last `.` sits in the
-  name body — dotfiles like `.gitignore` never match a mapping entry.
+  name body — dotfiles like `.gitignore` never match extension entries;
+  they, and extension-less files like `Makefile`, are covered by the MIME
+  layer instead (see Configuration).
 - Canceling fzf (Esc / Ctrl-C) or picking nothing exits `0`; a real fzf
   failure exits `1` with a message on stderr.
 - History rows are appended on every real open; dry-run appends nothing.
@@ -704,7 +716,9 @@ pass an explicit `OPENER` instead.
 **Why doesn't `.gitignore` match a mapping entry?**
 
 An extension exists only when the last `.` sits in the name body; dotfiles
-therefore have no extension at all.
+therefore have no extension at all. Cover them with a MIME entry instead
+(`text/* = !nvim`) — `.gitignore`/`.bashrc` are reported as `text/plain`
+and match.
 
 **Why does canceling fzf exit 0?**
 

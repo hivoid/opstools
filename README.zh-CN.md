@@ -539,16 +539,24 @@ pdf = okular --unique
 txt = kate
 png = gwenview
 
+# MIME 兜底: 含 "/" 的 key 按 glob 匹配 file(1) 检出的类型，
+# 仅当扩展名未命中时检测，覆盖 .bashrc/Makefile 等无扩展名文件
+text/* = !nvim
+
 # 命令前的 ! / & 前缀控制运行方式: ! = 前台, & = 脱钩
 md  = !nvim
 pdf = &okular
 ```
 
 - 扩展名与选中文件的扩展名大小写不敏感比较。
+- MIME 条目（含 `/` 的 key）按 glob 匹配 `file(1)` 检出的 MIME 类型
+  （大小写不敏感）；仅当扩展名未命中时才检测，`file` 缺失时跳过该层。
+  首条命中生效，更具体的 key（如 `text/x-shellscript`）要写在
+  `text/*` 这类通配前面。
 - 值按空白拆分为命令与参数；不支持含空格的单个参数，也不支持行尾注释。
 - `!` / `&` 前缀可与命令名粘连（`!nvim`）或以空白分隔（`! nvim`），两者等价。
-- 每个文件的打开器查找顺序：显式 `OPENER` 参数 → 映射表 →
-  `xdg-open`（Linux）/ `open`（macOS）。
+- 每个文件的打开器查找顺序：显式 `OPENER` 参数 → 映射表
+  （先扩展名后 MIME）→ `xdg-open`（Linux）/ `open`（macOS）。
 
 ### 用法
 
@@ -599,7 +607,8 @@ fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
   `${XDG_CACHE_HOME:-~/.cache}/fo`；缓存写入尽力而为、绝不致命
   （只读 FS / 无 HOME 也可用，仅告警）。
 - 扩展名只在最后一个 `.` 位于文件名主体时才被识别——`.gitignore` 这类
-  点文件因此永远不匹配映射表。
+  点文件因此永远不匹配扩展名条目，它们与 `Makefile` 等无扩展名文件由
+  MIME 层兜底（见配置）。
 - 取消 fzf（Esc / Ctrl-C）或未选中任何文件退出码 `0`；fzf 真实故障
   退出码 `1` 并在 stderr 报错。
 - 真实打开时历史逐条追加；dry-run 不追加任何记录。
@@ -636,7 +645,8 @@ fo -- --multi --height 40%   # -- 之后的参数原样传给 fzf
 **`.gitignore` 为什么匹配不到映射表？**
 
 扩展名只在最后一个 `.` 位于文件名主体时才存在，点文件因此没有扩展名
-可言。
+可言。要覆盖它们用 MIME 条目（如 `text/* = !nvim`）——`.gitignore`/
+`.bashrc` 会被 `file` 判为 `text/plain` 而命中。
 
 **取消 fzf 为什么退出码是 0？**
 
