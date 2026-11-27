@@ -14,7 +14,7 @@ over time.
 | ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | [keydist](#keydist) | Python 3.11+ | Push secrets from one central manifest into each consumer's config file (`.env` / JSON / whole file); run post commands when they change                     |
 | [dly](#dly)         | Python 3.8+  | Open, view, and list daily notes and task notes; short date expressions with composable offsets, configurable editor and viewer |
-| [fo](#fo)           | Bash 4+      | Pick files with fzf and open each with a mapped or default opener; fd/fdfind/find candidates, optional preview, dry-run |
+| [fo](#fo)           | Bash 4+      | Open any file in seconds: fuzzy-pick with fzf, Enter opens it via a mapped or default opener; optional preview, dry-run |
 
 ## Principles
 
@@ -538,7 +538,13 @@ script's comments.
 
 ## fo
 
-`fo` is a file picker: it feeds a candidate list (fd / fdfind / find, tried
+`fo` is built for one thing: getting any file open in seconds. Type a few
+characters, hit Enter, and the file opens in the right program — hands
+never leave the keyboard and there is no digging through directory trees.
+"Find the file, choose the app" collapses into one input, a real boost to
+everyday efficiency.
+
+Under the hood, it feeds a candidate list (fd / fdfind / find, tried
 in that order) into fzf and hands every picked file to an opener — an
 explicit `OPENER` argument, an extension/MIME mapping table, or the desktop
 default (`xdg-open` on Linux, `open` on macOS). It never edits files
